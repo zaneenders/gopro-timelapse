@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+.DS_Store
+*.mp4
+*.frames/
+Tools/
+Vendor/
+.gpr-build/
