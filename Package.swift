@@ -24,6 +24,7 @@ var targets: [Target] = [
     ]
   ),
   .testTarget(name: "GoProTimelapseTests", dependencies: ["GoProTimelapse"]),
+  .testTarget(name: "GoProTimelapseUITests", dependencies: ["GoProTimelapseUI"]),
 ]
 
 #if os(macOS)

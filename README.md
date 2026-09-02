@@ -123,15 +123,16 @@ swift run gopro-timelapse-wayland
 ```
 
 Enter a source directory and press **Load**. The current UI scans and lists GPR
-or rendered photo frames and displays GPR previews. Analyze, Auto Correct, and
-Render are visible placeholders for the next milestones. Rendered-photo preview
-decoding is not implemented yet.
+or rendered photo frames. When a GPR has a same-basename JPEG beside it, the UI
+uses that JPEG as a fast browsing proxy; otherwise it develops a RAW preview.
+Rendered photos are decoded portably through ffmpeg. Analyze, Auto Correct, and
+Render are visible placeholders for the next milestones.
 
 ## Current scope
 
 Implemented in the CLI: GPR-to-DNG conversion, LibRaw development, exposure
 and color controls, keyframe interpolation, parallel RAW processing, and ffmpeg
 encoding. Implemented in the early UI: source entry, sequence scanning, a frame
-list, selection, and GPR preview rendering through Chroma. Automatic luminance
-analysis, deflickering, rendered-photo previews, and a visual ramp editor are
-not yet implemented.
+list, selection, paired-JPEG proxy previews, rendered-photo previews, and RAW
+fallback preview rendering through Chroma. Automatic luminance analysis,
+deflickering, and a visual ramp editor are not yet implemented.
