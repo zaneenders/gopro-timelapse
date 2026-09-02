@@ -104,9 +104,34 @@ and shadows and vibrance conventionally in `-1...1`.
 
 Run `swift run gopro-timelapse --help` for the complete CLI reference.
 
+## Graphical UI (early preview)
+
+The Chroma UI builds and runs directly with Swift Package Manager; no Xcode
+project is required. During development it uses the sibling `../chroma`
+checkout.
+
+On macOS:
+
+```sh
+swift run gopro-timelapse-mac
+```
+
+On Linux with a Wayland session:
+
+```sh
+swift run gopro-timelapse-wayland
+```
+
+Enter a source directory and press **Load**. The current UI scans and lists GPR
+or rendered photo frames and displays GPR previews. Analyze, Auto Correct, and
+Render are visible placeholders for the next milestones. Rendered-photo preview
+decoding is not implemented yet.
+
 ## Current scope
 
-Implemented: GPR-to-DNG conversion, LibRaw development, exposure and color
-controls, keyframe interpolation, parallel RAW processing, and ffmpeg encoding.
-Automatic luminance analysis, deflickering, previews, and a visual ramp editor
-are not yet implemented.
+Implemented in the CLI: GPR-to-DNG conversion, LibRaw development, exposure
+and color controls, keyframe interpolation, parallel RAW processing, and ffmpeg
+encoding. Implemented in the early UI: source entry, sequence scanning, a frame
+list, selection, and GPR preview rendering through Chroma. Automatic luminance
+analysis, deflickering, rendered-photo previews, and a visual ramp editor are
+not yet implemented.
