@@ -16,6 +16,7 @@ public final class TimelapseUIState {
 
   private var loadGeneration: UInt64 = 0
   private var previewTask: Task<Void, Never>?
+  private var prefetchTask: Task<Void, Never>?
   private var previewSources: [URL: URL] = [:]
   private var previewCache: [URL: CachedPreview] = [:]
   private var previewCacheTick: UInt64 = 0
@@ -28,6 +29,7 @@ public final class TimelapseUIState {
 
   deinit {
     previewTask?.cancel()
+    prefetchTask?.cancel()
   }
 
   public var selectedURL: URL? {
@@ -39,6 +41,8 @@ public final class TimelapseUIState {
     loadGeneration &+= 1
     let generation = loadGeneration
     previewTask?.cancel()
+    prefetchTask?.cancel()
+    prefetchTask = nil
     isLoading = true
     frames = []
     selectedFrame = 0
@@ -85,10 +89,12 @@ public final class TimelapseUIState {
   public func selectFrame(_ index: Int) {
     guard frames.indices.contains(index), index != selectedFrame else { return }
     selectedFrame = index
+    frameListController.scroll(to: max(0, Float(index - 2) * 52))
     if let cached = cachedPreview(for: frames[index]) {
       preview = cached.image
       previewLabel = cached.kind.label
       status = "Frame \(index + 1) of \(frames.count) — \(frames[index].lastPathComponent)"
+      prefetchNeighbors(around: index)
       return
     }
 
@@ -100,6 +106,26 @@ public final class TimelapseUIState {
     } else {
       startPreview(for: index)
     }
+  }
+
+  public func moveSelection(by delta: Int) -> CommandResult {
+    guard !frames.isEmpty else { return .ignored }
+    let next = min(max(0, selectedFrame + delta), frames.count - 1)
+    guard next != selectedFrame else { return .handled }
+    selectFrame(next)
+    return .handled
+  }
+
+  public func selectFirstFrame() -> CommandResult {
+    guard !frames.isEmpty else { return .ignored }
+    selectFrame(0)
+    return .handled
+  }
+
+  public func selectLastFrame() -> CommandResult {
+    guard !frames.isEmpty else { return .ignored }
+    selectFrame(frames.count - 1)
+    return .handled
   }
 
   private func startPreview(for index: Int) {
@@ -137,6 +163,7 @@ public final class TimelapseUIState {
           self.preview = image
           self.previewLabel = kind.label
           self.status = "Frame \(index + 1) of \(self.frames.count) — \(source.lastPathComponent)"
+          self.prefetchNeighbors(around: index)
         case .failure(let message):
           self.preview = nil
           self.status = "Preview failed for \(source.lastPathComponent): \(message)"
@@ -284,6 +311,43 @@ public final class TimelapseUIState {
     throw PreviewError.ffmpegNotFound
   }
 
+  private func prefetchNeighbors(around index: Int) {
+    guard prefetchTask == nil else { return }
+    let candidates = [index - 1, index + 1].compactMap { neighbor -> (URL, URL)? in
+      guard frames.indices.contains(neighbor) else { return nil }
+      let frame = frames[neighbor]
+      guard previewCache[frame] == nil, let source = previewSources[frame], source != frame else {
+        return nil
+      }
+      return (frame, source)
+    }
+    guard !candidates.isEmpty else { return }
+
+    // Keep prefetch bounded to one task. It decodes the two adjacent proxies
+    // serially, then starts another pass around the latest selection.
+    prefetchTask = Task { [weak self] in
+      for (frame, source) in candidates {
+        guard !Task.isCancelled else { return }
+        let result = await Task.detached(priority: .utility) {
+          do { return PreviewResult.success(try Self.renderPreview(source: source), kind: .renderedProxy) }
+          catch { return PreviewResult.failure(String(describing: error)) }
+        }.value
+        guard !Task.isCancelled else { return }
+        await MainActor.run {
+          guard let self else { return }
+          if case .success(let image, let kind) = result {
+            self.storePreview(image, kind: kind, for: frame)
+          }
+        }
+      }
+      await MainActor.run {
+        guard let self else { return }
+        self.prefetchTask = nil
+        self.prefetchNeighbors(around: self.selectedFrame)
+      }
+    }
+  }
+
   private func cachedPreview(for source: URL) -> CachedPreview? {
     guard var cached = previewCache[source] else { return nil }
     previewCacheTick &+= 1
@@ -354,6 +418,11 @@ private enum PreviewError: Error, CustomStringConvertible {
 
 @MainActor
 public struct TimelapseBlock: Block {
+  public static let previousFrameCommand = Command.application("gopro-timelapse.frame.previous")
+  public static let nextFrameCommand = Command.application("gopro-timelapse.frame.next")
+  public static let firstFrameCommand = Command.application("gopro-timelapse.frame.first")
+  public static let lastFrameCommand = Command.application("gopro-timelapse.frame.last")
+
   public let state: TimelapseUIState
 
   public init(state: TimelapseUIState) {
@@ -376,6 +445,10 @@ public struct TimelapseBlock: Block {
         footer(theme: theme)
       }
       .background(theme.background)
+      .onCommand(Self.previousFrameCommand) { state.moveSelection(by: -1) }
+      .onCommand(Self.nextFrameCommand) { state.moveSelection(by: 1) }
+      .onCommand(Self.firstFrameCommand) { state.selectFirstFrame() }
+      .onCommand(Self.lastFrameCommand) { state.selectLastFrame() }
     }
   }
 

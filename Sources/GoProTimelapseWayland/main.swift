@@ -32,6 +32,10 @@ struct GoProTimelapseWaylandApp: WaylandApp {
       bind(.space, to: .action(.activate))
       bind(.pageUp, to: .navigation(.pageUp))
       bind(.pageDown, to: .navigation(.pageDown))
+      bind("k", to: TimelapseBlock.previousFrameCommand)
+      bind("j", to: TimelapseBlock.nextFrameCommand)
+      bind(.upArrow, modifiers: .superKey, to: TimelapseBlock.firstFrameCommand)
+      bind(.downArrow, modifiers: .superKey, to: TimelapseBlock.lastFrameCommand)
     }
   }
 

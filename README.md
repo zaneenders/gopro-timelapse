@@ -125,8 +125,11 @@ swift run gopro-timelapse-wayland
 Enter a source directory and press **Load**. The current UI scans and lists GPR
 or rendered photo frames. When a GPR has a same-basename JPEG beside it, the UI
 uses that JPEG as a fast browsing proxy; otherwise it develops a RAW preview.
-Rendered photos are decoded portably through ffmpeg. Analyze, Auto Correct, and
-Render are visible placeholders for the next milestones.
+Rendered photos are decoded portably through ffmpeg. Use `j`/`k` to move to the
+next/previous frame; Command-Up/Down on macOS or Super-Up/Down on Linux jumps
+to the first/last frame. Neighboring JPEG proxies are prefetched for smoother
+browsing. Analyze, Auto Correct, and Render are visible placeholders for the
+next milestones.
 
 ## Current scope
 

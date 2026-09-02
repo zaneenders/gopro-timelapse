@@ -32,6 +32,10 @@ struct GoProTimelapseMacApp: MetalApp {
       bind(.space, to: .action(.activate))
       bind(.pageUp, to: .navigation(.pageUp))
       bind(.pageDown, to: .navigation(.pageDown))
+      bind("k", to: TimelapseBlock.previousFrameCommand)
+      bind("j", to: TimelapseBlock.nextFrameCommand)
+      bind(.upArrow, modifiers: .command, to: TimelapseBlock.firstFrameCommand)
+      bind(.downArrow, modifiers: .command, to: TimelapseBlock.lastFrameCommand)
     }
   }
 
