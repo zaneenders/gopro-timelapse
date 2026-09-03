@@ -1,4 +1,5 @@
 import Chroma
+import GoProTimelapseCore
 
 struct LuminanceGraph: PrimitiveBlock {
   var samples: [LuminanceSample]

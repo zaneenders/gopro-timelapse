@@ -1,5 +1,6 @@
 import Chroma
 import Foundation
+import GoProTimelapseCore
 import GprTools
 import Libraw
 import Synchronization
@@ -35,14 +36,9 @@ public final class TimelapseUIState {
 
   private var loadGeneration: UInt64 = 0
   private var previewTask: Task<Void, Never>?
-  private var prefetchTask: Task<Void, Never>?
   private var analysisTask: Task<Void, Never>?
   private var renderTask: Task<Void, Never>?
   private var previewSources: [URL: URL] = [:]
-  private var previewCache: [URL: CachedPreview] = [:]
-  private var previewCacheTick: UInt64 = 0
-  private let maximumPreviewCacheCount = 24
-  private let maximumPreviewCacheBytes = 160 * 1024 * 1024
 
   public init(sourcePath: String = FileManager.default.currentDirectoryPath) {
     self.sourcePath = sourcePath
@@ -50,7 +46,6 @@ public final class TimelapseUIState {
 
   deinit {
     previewTask?.cancel()
-    prefetchTask?.cancel()
     analysisTask?.cancel()
     renderTask?.cancel()
   }
@@ -72,10 +67,8 @@ public final class TimelapseUIState {
     loadGeneration &+= 1
     let generation = loadGeneration
     previewTask?.cancel()
-    prefetchTask?.cancel()
     analysisTask?.cancel()
     renderTask?.cancel()
-    prefetchTask = nil
     analysisTask = nil
     renderTask = nil
     isLoading = true
@@ -94,8 +87,6 @@ public final class TimelapseUIState {
     preview = nil
     previewLabel = nil
     previewSources = [:]
-    previewCache = [:]
-    previewCacheTick = 0
     status = "Scanning \(directory.path)…"
 
     Task { [weak self] in
@@ -138,13 +129,6 @@ public final class TimelapseUIState {
     exposure = grade.exposure
     temperature = grade.temperature
     frameListController.scroll(to: max(0, Float(index - 2) * 52))
-    if let cached = cachedPreview(for: frames[index]) {
-      preview = cached.image
-      previewLabel = cached.kind.label
-      status = "Frame \(index + 1) of \(frames.count) — \(frames[index].lastPathComponent)"
-      prefetchNeighbors(around: index)
-      return
-    }
 
     // Selection is immediate, but LibRaw/GPR conversion is not cooperatively
     // cancellable. Keep one conversion in flight and load the latest selection
@@ -216,10 +200,13 @@ public final class TimelapseUIState {
     luminanceSamples = []
     luminanceBaseline = []
     automaticExposure = []
+    // A new analysis invalidates the currently displayed developed preview.
+    preview = nil
+    previewLabel = nil
     status = "Analyzing luminance 0/\(sources.count)…"
     appendConsole(
       .system,
-      "Starting luminance analysis for \(sources.count) frames in \(sourcePath).\n")
+      "Starting fresh luminance analysis for \(sources.count) frames; no analysis cache is used.\n")
 
     analysisTask = Task { [weak self] in
       // Decoding dominates this pass. Keep several independent frames in flight,
@@ -240,7 +227,8 @@ public final class TimelapseUIState {
             }
             do {
               let image = try Self.renderPreview(source: source)
-              return .success(ExposureWorkflow.luminance(of: image, frame: index))
+              let sample = ExposureWorkflow.luminance(of: image, frame: index)
+              return .success(sample)
             } catch {
               return .failure(index: index, message: String(describing: error))
             }
@@ -299,8 +287,7 @@ public final class TimelapseUIState {
       let samples = orderedSamples.compactMap { $0 }
       guard let self, samples.count == sources.count else { return }
       self.luminanceSamples = samples
-      let window = max(15, min(121, self.frames.count / 12))
-      let correction = ExposureWorkflow.automaticCorrection(samples: samples, window: window)
+      let correction = ExposureWorkflow.automaticCorrection(samples: samples)
       self.luminanceBaseline = correction.baseline
       self.automaticExposure = correction.correction
       self.automaticCorrectionEnabled = true
@@ -323,15 +310,15 @@ public final class TimelapseUIState {
       status = "Analyze all frames before generating automatic correction."
       return
     }
-    let window = max(15, min(121, frames.count / 12))
-    let result = ExposureWorkflow.automaticCorrection(samples: luminanceSamples, window: window)
+    let settings = AutomaticCorrectionSettings()
+    let result = ExposureWorkflow.automaticCorrection(samples: luminanceSamples, settings: settings)
     luminanceBaseline = result.baseline
     automaticExposure = result.correction
     automaticCorrectionEnabled = true
     let peak = result.correction.map(abs).max() ?? 0
     status = String(
-      format: "Generated bounded automatic correction (peak %.2f EV, window %d frames).",
-      peak, window)
+      format: "Generated bounded automatic correction (peak %.2f EV, %.0f%% trend window).",
+      peak, settings.baselineWindowFraction * 100)
   }
 
   public func renderMovie(preview: Bool) {
@@ -391,7 +378,7 @@ public final class TimelapseUIState {
               progress: { completed in progressState.completed = completed },
               outputHandler: { stream, text in self.appendConsole(stream, text) })
           } else {
-            metrics = try MovieRenderer.render(
+            metrics = try await MovieRenderer.render(
               sources: sources, grades: grades, output: output, settings: settings,
               progress: { completed in progressState.completed = completed },
               outputHandler: { stream, text in self.appendConsole(stream, text) })
@@ -524,11 +511,9 @@ public final class TimelapseUIState {
         }
         switch result {
         case .success(let image, let kind):
-          self.storePreview(image, kind: kind, for: source)
           self.preview = image
           self.previewLabel = kind.label
           self.status = "Frame \(index + 1) of \(self.frames.count) — \(source.lastPathComponent)"
-          self.prefetchNeighbors(around: index)
         case .failure(let message):
           self.preview = nil
           self.status = "Preview failed for \(source.lastPathComponent): \(message)"
@@ -682,68 +667,6 @@ public final class TimelapseUIState {
     throw PreviewError.ffmpegNotFound
   }
 
-  private func prefetchNeighbors(around index: Int) {
-    guard prefetchTask == nil else { return }
-    let candidates = [index - 1, index + 1].compactMap { neighbor -> (URL, URL)? in
-      guard frames.indices.contains(neighbor) else { return nil }
-      let frame = frames[neighbor]
-      guard previewCache[frame] == nil, let source = previewSources[frame], source != frame else {
-        return nil
-      }
-      return (frame, source)
-    }
-    guard !candidates.isEmpty else { return }
-
-    // Keep prefetch bounded to one task. It decodes the two adjacent proxies
-    // serially, then starts another pass around the latest selection.
-    prefetchTask = Task { [weak self] in
-      for (frame, source) in candidates {
-        guard !Task.isCancelled else { return }
-        let result = await Task.detached(priority: .utility) {
-          do { return PreviewResult.success(try Self.renderPreview(source: source), kind: .renderedProxy) } catch {
-            return PreviewResult.failure(String(describing: error))
-          }
-        }.value
-        guard !Task.isCancelled else { return }
-        await MainActor.run {
-          guard let self else { return }
-          if case .success(let image, let kind) = result {
-            self.storePreview(image, kind: kind, for: frame)
-          }
-        }
-      }
-      await MainActor.run {
-        guard let self else { return }
-        self.prefetchTask = nil
-        self.prefetchNeighbors(around: self.selectedFrame)
-      }
-    }
-  }
-
-  private func cachedPreview(for source: URL) -> CachedPreview? {
-    guard var cached = previewCache[source] else { return nil }
-    previewCacheTick &+= 1
-    cached.lastUsed = previewCacheTick
-    previewCache[source] = cached
-    return cached
-  }
-
-  private func storePreview(_ image: ImageResource, kind: PreviewKind, for source: URL) {
-    previewCacheTick &+= 1
-    previewCache[source] = CachedPreview(image: image, kind: kind, lastUsed: previewCacheTick)
-    var byteCount = previewCache.values.reduce(0) { $0 + $1.image.rgba8.count }
-    while previewCache.count > maximumPreviewCacheCount || byteCount > maximumPreviewCacheBytes {
-      guard let oldest = previewCache.min(by: { $0.value.lastUsed < $1.value.lastUsed }) else { break }
-      byteCount -= oldest.value.image.rgba8.count
-      previewCache.removeValue(forKey: oldest.key)
-    }
-  }
-}
-
-private struct CachedPreview {
-  var image: ImageResource
-  var kind: PreviewKind
-  var lastUsed: UInt64
 }
 
 private struct PreviewGrade: Sendable {

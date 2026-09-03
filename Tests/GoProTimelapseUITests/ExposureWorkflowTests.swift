@@ -1,5 +1,6 @@
 import Testing
 
+@testable import GoProTimelapseCore
 @testable import GoProTimelapseUI
 
 @Test func creativeGradesInterpolateSmoothly() {

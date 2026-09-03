@@ -1,4 +1,5 @@
 import Foundation
+import GoProTimelapseCore
 import GprTools
 import Libraw
 import Synchronization
@@ -184,7 +185,7 @@ enum MovieRenderer {
     settings: MovieRenderSettings,
     progress: @escaping @Sendable (Int) -> Void,
     outputHandler: @escaping ProcessOutputHandler
-  ) throws -> MovieRenderMetrics {
+  ) async throws -> MovieRenderMetrics {
     let start = ContinuousClock.now
     guard !sources.isEmpty, sources.count == grades.count else {
       throw MovieRenderError.invalidSequence
@@ -214,10 +215,32 @@ enum MovieRenderer {
       "-video_size", "\(first.width)x\(first.height)",
       "-framerate", String(settings.fps), "-i", "-",
     ]
+    let encoderList = availableEncoders(ffmpeg)
+    let encoder: String
     if settings.preview {
+      encoder = "libx264"
       arguments += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "30"]
     } else {
-      arguments += ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-tag:v", "hvc1"]
+      #if os(macOS)
+      if encoderList.contains("hevc_videotoolbox") {
+        encoder = "VideoToolbox HEVC"
+        arguments += [
+          "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-maxrate", "30M",
+          "-bufsize", "60M", "-allow_sw", "0", "-tag:v", "hvc1",
+        ]
+      } else {
+        encoder = "libx265 HEVC"
+        arguments += ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-tag:v", "hvc1"]
+      }
+      #else
+      if encoderList.contains("hevc_nvenc") {
+        encoder = "NVENC HEVC"
+        arguments += ["-c:v", "hevc_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20", "-tag:v", "hvc1"]
+      } else {
+        encoder = "libx265 HEVC"
+        arguments += ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-tag:v", "hvc1"]
+      }
+      #endif
     }
     arguments += [
       "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709",
@@ -245,16 +268,49 @@ enum MovieRenderer {
     do {
       try writer.write(contentsOf: first.pixels)
       progress(1)
-      for index in sources.indices.dropFirst() {
-        if Task.isCancelled { throw CancellationError() }
-        let image = try develop(
-          source: sources[index], grade: grades[index], width: settings.maximumWidth,
-          denoise: settings.preview ? 0.15 : 0.7, temporary: temporary)
-        guard image.width == first.width, image.height == first.height,
-          image.pixels.count == expectedBytes
-        else { throw MovieRenderError.inconsistentDimensions }
-        try writer.write(contentsOf: image.pixels)
-        progress(index + 1)
+
+      // RAW development dwarfs pipe writes and encoding. Develop independent
+      // frames concurrently, but consume them in source order so ffmpeg still
+      // receives a deterministic stream. Keeping the window small bounds 4K
+      // RGB memory (roughly 24 MB per completed frame).
+      let workerCount = min(
+        max(2, ProcessInfo.processInfo.activeProcessorCount / 2),
+        max(1, sources.count - 1))
+      var nextToEnqueue = 1
+      var nextToWrite = 1
+      var completedImages: [Int: LibrawRGBImage] = [:]
+
+      try await withThrowingTaskGroup(of: (Int, LibrawRGBImage).self) { group in
+        func enqueue(_ index: Int) {
+          group.addTask(priority: .userInitiated) {
+            if Task.isCancelled { throw CancellationError() }
+            let image = try develop(
+              source: sources[index], grade: grades[index], width: settings.maximumWidth,
+              denoise: settings.preview ? 0.15 : 0.7, temporary: temporary)
+            return (index, image)
+          }
+        }
+
+        while nextToEnqueue < sources.count && nextToEnqueue < 1 + workerCount {
+          enqueue(nextToEnqueue)
+          nextToEnqueue += 1
+        }
+
+        while let (index, image) = try await group.next() {
+          completedImages[index] = image
+          while let ready = completedImages.removeValue(forKey: nextToWrite) {
+            guard ready.width == first.width, ready.height == first.height,
+              ready.pixels.count == expectedBytes
+            else { throw MovieRenderError.inconsistentDimensions }
+            try writer.write(contentsOf: ready.pixels)
+            nextToWrite += 1
+            progress(nextToWrite)
+            if nextToEnqueue < sources.count {
+              enqueue(nextToEnqueue)
+              nextToEnqueue += 1
+            }
+          }
+        }
       }
       try writer.close()
       process.waitUntilExit()
@@ -262,17 +318,17 @@ enum MovieRenderer {
       try? writer.close()
       process.terminate()
       process.waitUntilExit()
-      outputReaders.wait()
+      await wait(for: outputReaders)
       throw error
     }
-    outputReaders.wait()
+    await wait(for: outputReaders)
     guard process.terminationStatus == 0 else {
       throw MovieRenderError.ffmpegFailed(
         capturedError.text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
     return metrics(
       start: start, sources: sources, output: output, settings: settings,
-      encoder: settings.preview ? "libx264" : "libx265 HEVC", source: "GPR/LibRaw")
+      encoder: encoder, source: "GPR/LibRaw")
   }
 
   private static func develop(
@@ -334,6 +390,14 @@ enum MovieRenderer {
     process.waitUntilExit()
     readers.wait()
     return (capturedOutput.text, capturedError.text)
+  }
+
+  private static func wait(for group: DispatchGroup) async {
+    await withCheckedContinuation { continuation in
+      group.notify(queue: .global(qos: .utility)) {
+        continuation.resume()
+      }
+    }
   }
 
   private static func startReading(

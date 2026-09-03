@@ -1,5 +1,5 @@
 {
-  "originHash" : "c2efa276d4dbd1d4b112fa55e6017f7fbd56cd925720213027f732103d7d9cfe",
+  "originHash" : "0bcf5e4d50dc987e9d3d517234aad955c198d5b647fd31be220a678d9900bd9e",
   "pins" : [
     {
       "identity" : "swift-gpr_tools",
@@ -8,15 +8,6 @@
       "state" : {
         "branch" : "main",
         "revision" : "d2b57cde665c7bee0528fb69da5245c71c95de61"
-      }
-    },
-    {
-      "identity" : "swift-libraw",
-      "kind" : "remoteSourceControl",
-      "location" : "git@github.com:zaneenders/swift-libraw.git",
-      "state" : {
-        "branch" : "main",
-        "revision" : "24baf6168b8b0adca7e9cff8466345b5a52fd156"
       }
     }
   ],

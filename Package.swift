@@ -3,14 +3,17 @@ import PackageDescription
 
 var products: [Product] = [
   .executable(name: "gopro-timelapse", targets: ["GoProTimelapse"]),
+  .library(name: "GoProTimelapseCore", targets: ["GoProTimelapseCore"]),
   .library(name: "GoProTimelapseUI", targets: ["GoProTimelapseUI"]),
 ]
 
 var chromaTraits: Set<Package.Dependency.Trait> = []
 var targets: [Target] = [
+  .target(name: "GoProTimelapseCore"),
   .executableTarget(
     name: "GoProTimelapse",
     dependencies: [
+      "GoProTimelapseCore",
       .product(name: "GprTools", package: "swift-gpr_tools"),
       .product(name: "Libraw", package: "swift-libraw"),
     ]
@@ -18,13 +21,17 @@ var targets: [Target] = [
   .target(
     name: "GoProTimelapseUI",
     dependencies: [
+      "GoProTimelapseCore",
       .product(name: "Chroma", package: "chroma"),
       .product(name: "GprTools", package: "swift-gpr_tools"),
       .product(name: "Libraw", package: "swift-libraw"),
     ]
   ),
+  .testTarget(name: "GoProTimelapseCoreTests", dependencies: ["GoProTimelapseCore"]),
   .testTarget(name: "GoProTimelapseTests", dependencies: ["GoProTimelapse"]),
-  .testTarget(name: "GoProTimelapseUITests", dependencies: ["GoProTimelapseUI"]),
+  .testTarget(
+    name: "GoProTimelapseUITests",
+    dependencies: ["GoProTimelapseUI", "GoProTimelapseCore"]),
 ]
 
 #if os(macOS)
@@ -67,7 +74,7 @@ let package = Package(
       traits: chromaTraits
     ),
     .package(url: "git@github.com:zaneenders/swift-gpr_tools.git", branch: "main"),
-    .package(url: "git@github.com:zaneenders/swift-libraw.git", branch: "main"),
+    .package(path: "../swift-libraw"),
   ],
   targets: targets
 )

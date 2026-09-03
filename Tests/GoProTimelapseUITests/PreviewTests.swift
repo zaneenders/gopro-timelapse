@@ -3,7 +3,7 @@ import Testing
 
 @testable import GoProTimelapseUI
 
-@Test @MainActor func pairedJPEGPreviewLoadsAndCaches() async throws {
+@Test @MainActor func pairedJPEGPreviewLoadsWithoutReusingImages() async throws {
   let sourceDirectory = URL(fileURLWithPath: "/Users/zane/Movies/26-09-01/tl", isDirectory: true)
   guard FileManager.default.fileExists(atPath: sourceDirectory.path) else { return }
 
@@ -32,7 +32,12 @@ import Testing
     #expect(state.preview != nil)
     #expect(state.moveSelection(by: -1) == .handled)
     #expect(state.selectedFrame == 0)
-    // Returning to the first frame should hit the in-memory cache immediately.
-    #expect(!state.isLoading)
+    // No preview cache: returning to frame zero decodes it again.
+    #expect(state.isLoading)
+    for _ in 0..<200 {
+      if !state.isLoading { break }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    #expect(state.preview != nil)
   }
 }
