@@ -1,6 +1,15 @@
 {
-  "originHash" : "0bcf5e4d50dc987e9d3d517234aad955c198d5b647fd31be220a678d9900bd9e",
+  "originHash" : "a1b2bb9470cabcd76f25a96871dbf3501d29d19c8d9bf27f9e6817c087884bd2",
   "pins" : [
+    {
+      "identity" : "chroma",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/zaneenders/chroma.git",
+      "state" : {
+        "branch" : "display-images",
+        "revision" : "62ad7178b66c27e7598bb21397911d4d57b55643"
+      }
+    },
     {
       "identity" : "swift-gpr_tools",
       "kind" : "remoteSourceControl",
@@ -8,6 +17,15 @@
       "state" : {
         "branch" : "main",
         "revision" : "d2b57cde665c7bee0528fb69da5245c71c95de61"
+      }
+    },
+    {
+      "identity" : "swift-libraw",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/zaneenders/swift-libraw.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "dfb06e2b6c68c989b0c7f95a98988e0eb864277b"
       }
     }
   ],

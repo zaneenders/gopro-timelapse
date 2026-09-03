@@ -9,7 +9,13 @@ var products: [Product] = [
 
 var chromaTraits: Set<Package.Dependency.Trait> = []
 var targets: [Target] = [
-  .target(name: "GoProTimelapseCore"),
+  .target(
+    name: "GoProTimelapseCore",
+    dependencies: [
+      .product(name: "GprTools", package: "swift-gpr_tools"),
+      .product(name: "Libraw", package: "swift-libraw"),
+    ]
+  ),
   .executableTarget(
     name: "GoProTimelapse",
     dependencies: [
@@ -70,11 +76,12 @@ let package = Package(
   products: products,
   dependencies: [
     .package(
-      path: "../chroma",
+      url: "https://github.com/zaneenders/chroma.git",
+      branch: "display-images",
       traits: chromaTraits
     ),
     .package(url: "git@github.com:zaneenders/swift-gpr_tools.git", branch: "main"),
-    .package(path: "../swift-libraw"),
+    .package(url: "https://github.com/zaneenders/swift-libraw.git", branch: "main"),
   ],
   targets: targets
 )

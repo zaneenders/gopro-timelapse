@@ -34,9 +34,9 @@ public struct AutomaticCorrectionSettings: Equatable, Sendable {
 
   public init(
     baselineWindowFraction: Double = 0.10,
-    correctionSmoothingFraction: Double = 0.0025,
+    correctionSmoothingFraction: Double = 0,
     maximumCorrection: Double = 0.5,
-    maximumDeltaPerFrame: Double = 0.10,
+    maximumDeltaPerFrame: Double = 0.25,
     robustIterations: Int = 3,
     clippedHighlightThreshold: Double = 0.02
   ) {
@@ -94,7 +94,8 @@ public enum ExposureWorkflow {
     // Hampel-clean the fit input first, while retaining the original signal as
     // the value that correction is calculated against.
     let cleanedSignal = hampelClean(signal, radius: max(2, min(12, window / 4)))
-    let baseline = robustLOESS(cleanedSignal, window: window, iterations: settings.robustIterations)
+    var baseline = robustLOESS(cleanedSignal, window: window, iterations: settings.robustIterations)
+    baseline = extrapolateEdges(baseline, radius: max(2, window / 2))
 
     let limit = max(0, settings.maximumCorrection)
     var correction = zip(baseline, signal).map { target, measured in
@@ -109,9 +110,11 @@ public enum ExposureWorkflow {
       correction[index] = min(correction[index], 0)
     }
 
-    let smoothingRadius = max(
-      1, Int((Double(signal.count) * max(0, settings.correctionSmoothingFraction)).rounded()))
-    correction = triangularSmooth(correction, radius: min(8, smoothingRadius))
+    let smoothingRadius = Int(
+      (Double(signal.count) * max(0, settings.correctionSmoothingFraction)).rounded())
+    if smoothingRadius > 0 {
+      correction = triangularSmooth(correction, radius: min(8, smoothingRadius))
+    }
     correction = limitSlope(correction, maximumDelta: max(0, settings.maximumDeltaPerFrame))
 
     // Deflicker must not alter the sequence's overall creative exposure. Use a
@@ -126,7 +129,7 @@ public enum ExposureWorkflow {
     samples: [LuminanceSample],
     window: Int,
     maximumCorrection: Double = 0.5,
-    maximumDelta: Double = 0.10
+    maximumDelta: Double = 0.25
   ) -> (baseline: [Double], correction: [Double]) {
     let fraction = samples.isEmpty ? 0.10 : Double(max(3, window)) / Double(samples.count)
     return automaticCorrection(
@@ -237,6 +240,27 @@ public enum ExposureWorkflow {
       }
     }
     return fitted
+  }
+
+  private static func extrapolateEdges(_ values: [Double], radius: Int) -> [Double] {
+    guard values.count > 4, radius > 1 else { return values }
+    var result = values
+    let edge = min(radius, (values.count - 1) / 2)
+    let leftA = edge
+    let leftB = min(values.count - 1, edge * 2)
+    let leftSlope = (values[leftB] - values[leftA]) / Double(leftB - leftA)
+    for index in 0..<leftA {
+      result[index] = values[leftA] + Double(index - leftA) * leftSlope
+    }
+    let rightA = values.count - 1 - edge
+    let rightB = max(0, values.count - 1 - edge * 2)
+    let rightSlope = (values[rightA] - values[rightB]) / Double(rightA - rightB)
+    if rightA + 1 < values.count {
+      for index in (rightA + 1)..<values.count {
+        result[index] = values[rightA] + Double(index - rightA) * rightSlope
+      }
+    }
+    return result
   }
 
   private static func oddWindow(fraction: Double, count: Int, minimum: Int) -> Int {

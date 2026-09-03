@@ -35,6 +35,20 @@ private func samples(_ values: [Double], clipped: Set<Int> = []) -> [LuminanceSa
   #expect(result.correction.map(abs).max()! < 0.03)
 }
 
+@Test func defaultCorrectionPreservesAlternatingFrameResiduals() {
+  let values = (0..<120).map { frame in
+    -2.0 + (frame.isMultiple(of: 2) ? 0.12 : -0.12)
+  }
+  let result = ExposureWorkflow.automaticCorrection(samples: samples(values))
+  let corrected = zip(values, result.correction).map(+)
+  let beforeRange = values.max()! - values.min()!
+  let afterRange = corrected.max()! - corrected.min()!
+
+  #expect(afterRange < beforeRange * 0.4)
+  #expect(abs(result.correction[0]) > 0.05)
+  #expect(result.correction[0] * result.correction[1] < 0)
+}
+
 @Test func robustFitRejectsIsolatedFlickerAndReducesResidualEnergy() {
   var values = (0..<240).map { -3.0 + Double($0) / 180.0 }
   for frame in stride(from: 7, to: values.count, by: 23) { values[frame] += 0.35 }

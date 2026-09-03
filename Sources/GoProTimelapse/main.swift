@@ -1,5 +1,6 @@
 import Foundation
 import GprTools
+import GoProTimelapseCore
 import Libraw
 
 struct Options {
@@ -20,6 +21,9 @@ struct Options {
   var overwrite = false
   var keepFrames = false
   var dryRun = false
+  var automaticCorrection: String?
+  var automaticStrength = 1.0
+  var analyzeOutput: String?
 }
 
 enum CLIError: Error, CustomStringConvertible, Sendable {
@@ -46,6 +50,11 @@ func usage() {
            --keep-frames          Keep developed PNG frames beside the output
       -j, --jobs <number>         Parallel RAW workers (default: all cores)
           --denoise <0...1>       Chroma noise reduction (default: 0.7; 0 disables)
+          --analyze <file.json>  Analyze GPR frames in parallel, write correction, and exit
+          --automatic-correction <file.json>
+                                 Dense per-frame correction exported by Analyze
+          --automatic-strength <0...2>
+                                 Automatic correction strength (default: 1; 2 is diagnostic)
 
     VIDEO
       -o, --output <file>        Output movie (default: timelapse.mp4)
@@ -126,6 +135,16 @@ func parseArguments() throws -> Options? {
       let text = try value(after: &i, in: args, option: arg)
       guard let x = Double(text), (0...1).contains(x) else { throw CLIError.message("Denoise must be 0...1") }
       o.denoise = x
+    case "--analyze":
+      o.analyzeOutput = try value(after: &i, in: args, option: arg)
+    case "--automatic-correction":
+      o.automaticCorrection = try value(after: &i, in: args, option: arg)
+    case "--automatic-strength":
+      let text = try value(after: &i, in: args, option: arg)
+      guard let x = Double(text), (0...2).contains(x) else {
+        throw CLIError.message("Automatic strength must be 0...2")
+      }
+      o.automaticStrength = x
     case "--keep-frames": o.keepFrames = true
     case "-y", "--overwrite": o.overwrite = true
     case "--dry-run": o.dryRun = true
@@ -326,10 +345,40 @@ func run() async throws {
   let sources = useRAW ? gprs : photos
   guard !sources.isEmpty else { throw CLIError.message("No \(useRAW ? "GPR" : "photo") files found in \(input.path)") }
 
+  if let path = o.analyzeOutput {
+    guard useRAW else { throw CLIError.message("--analyze currently requires GPR sources") }
+    let settings = SequenceAnalysisSettings(jobs: o.jobs)
+    print("Analyzing \(sources.count) GPR frames with fixed RAW development settings…")
+    let result = try await SequenceAnalyzer.analyzeGPR(sources: sources, settings: settings) {
+      completed, total in
+      print("\rAnalyzing RAW \(completed)/\(total)", terminator: "")
+      try? FileHandle.standardOutput.synchronize()
+    }
+    print()
+    let url = URL(fileURLWithPath: path).standardizedFileURL
+    try result.correction.write(to: url)
+    let peak = result.correction.correction.map(abs).max() ?? 0
+    print(String(format: "Wrote %@ (peak %.3f EV)", url.path, peak))
+    return
+  }
+
   if let path = o.initializeRamp {
     try writeInitialRamp(path: path, frameCount: sources.count, overwrite: o.overwrite)
   }
   let ramp = try loadRamp(o.initializeRamp ?? o.ramp)
+  let automaticCorrection: [Double]
+  if let path = o.automaticCorrection {
+    let file = try AutomaticCorrectionFile.load(
+      from: URL(fileURLWithPath: path), expectedFrameCount: sources.count)
+    automaticCorrection = file.correction.map { $0 * o.automaticStrength }
+  } else {
+    automaticCorrection = [Double](repeating: 0, count: sources.count)
+  }
+  func finalGrade(frame: Int) -> Grade {
+    var grade = interpolatedGrade(frame: frame, ramp: ramp)
+    grade.exposure += automaticCorrection[frame]
+    return grade
+  }
   let output = URL(fileURLWithPath: o.output, relativeTo: URL(fileURLWithPath: fm.currentDirectoryPath))
     .standardizedFileURL
   if fm.fileExists(atPath: output.path), !o.overwrite {
@@ -339,6 +388,11 @@ func run() async throws {
   print("Source: \(useRAW ? "GPR RAW" : "rendered photos")")
   print("Frames: \(sources.count) (\(sources.first!.lastPathComponent) … \(sources.last!.lastPathComponent))")
   print("Ramp: \(ramp.keyframes.count) keyframe(s), \(ramp.interpolation) interpolation")
+  if let correction = o.automaticCorrection {
+    let peak = automaticCorrection.map(abs).max() ?? 0
+    print(String(format: "Automatic correction: %@ at %.0f%% strength (applied peak %.3f EV)",
+      correction, o.automaticStrength * 100, peak))
+  }
   print(String(format: "Video: %.2f seconds at %.3g fps → %@", Double(sources.count) / o.fps, o.fps, output.path))
   if o.dryRun { return }
 
@@ -422,7 +476,7 @@ func run() async throws {
         if fm.fileExists(atPath: destination.path) {
           if o.overwrite { try fm.removeItem(at: destination) } else { continue }
         }
-        pending.append((source: source, destination: destination, grade: interpolatedGrade(frame: index, ramp: ramp)))
+        pending.append((source: source, destination: destination, grade: finalGrade(frame: index)))
       }
 
       let state = RenderState()
@@ -463,7 +517,7 @@ func run() async throws {
       // Develop the first frame before launching ffmpeg so rawvideo has
       // exact dimensions. Remaining frames are developed in parallel.
       let firstImage = try renderer.renderRGB(
-        source: sources[0], grade: interpolatedGrade(frame: 0, ramp: ramp),
+        source: sources[0], grade: finalGrade(frame: 0),
         temporaryDirectory: temporary)
       let expectedBytes = firstImage.width * firstImage.height * 3
       guard firstImage.pixels.count == expectedBytes else {
@@ -534,7 +588,7 @@ func run() async throws {
             do {
               let image = try renderer.renderRGB(
                 source: sources[index],
-                grade: interpolatedGrade(frame: index, ramp: ramp),
+                grade: finalGrade(frame: index),
                 temporaryDirectory: temporary)
               await stream.frameCompleted(index: index, image: image)
             } catch {

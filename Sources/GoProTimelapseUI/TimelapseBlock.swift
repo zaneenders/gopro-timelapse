@@ -290,6 +290,16 @@ public final class TimelapseUIState {
       let correction = ExposureWorkflow.automaticCorrection(samples: samples)
       self.luminanceBaseline = correction.baseline
       self.automaticExposure = correction.correction
+      do {
+        let correctionURL = URL(fileURLWithPath: self.sourcePath).standardizedFileURL
+          .appendingPathComponent("automatic-correction.json")
+        try AutomaticCorrectionFile(
+          baseline: correction.baseline, correction: correction.correction
+        ).write(to: correctionURL)
+        self.appendConsole(.system, "Wrote automatic correction: \(correctionURL.path)\n")
+      } catch {
+        self.appendConsole(.stderr, "Unable to write automatic correction: \(error)\n")
+      }
       self.automaticCorrectionEnabled = true
       self.isAnalyzing = false
       self.analysisProgress = 1
@@ -314,6 +324,16 @@ public final class TimelapseUIState {
     let result = ExposureWorkflow.automaticCorrection(samples: luminanceSamples, settings: settings)
     luminanceBaseline = result.baseline
     automaticExposure = result.correction
+    do {
+      let correctionURL = URL(fileURLWithPath: sourcePath).standardizedFileURL
+        .appendingPathComponent("automatic-correction.json")
+      try AutomaticCorrectionFile(
+        baseline: result.baseline, correction: result.correction, settings: settings
+      ).write(to: correctionURL)
+      appendConsole(.system, "Wrote automatic correction: \(correctionURL.path)\n")
+    } catch {
+      appendConsole(.stderr, "Unable to write automatic correction: \(error)\n")
+    }
     automaticCorrectionEnabled = true
     let peak = result.correction.map(abs).max() ?? 0
     status = String(
