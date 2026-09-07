@@ -139,22 +139,23 @@ public final class TimelapseUIState {
   public func adjustExposure(by delta: Double) {
     exposure = min(8, max(-8, exposure + delta))
     setCurrentKeyframe()
+    gradeKeyframes[selectedFrame]?.exposure = exposure
     status = String(format: "Keyframe %d — exposure %+.2f EV", selectedFrame + 1, exposure)
   }
 
   public func adjustTemperature(by delta: Double) {
     temperature = min(12_000, max(2_000, temperature + delta))
     setCurrentKeyframe()
+    gradeKeyframes[selectedFrame]?.temperature = temperature
     status = "Keyframe \(selectedFrame + 1) — temperature \(Int(temperature)) K"
   }
 
   public func setCurrentKeyframe() {
     guard frames.indices.contains(selectedFrame) else { return }
-    var grade = ExposureWorkflow.grade(
+    // Snapshot the creative grade, not the displayed controls: the temperature
+    // display uses 5200 K as a fallback for as-shot (nil) white balance.
+    gradeKeyframes[selectedFrame] = ExposureWorkflow.grade(
       at: selectedFrame, keyframes: gradeKeyframes, frameCount: frames.count)
-    grade.exposure = exposure
-    grade.temperature = temperature
-    gradeKeyframes[selectedFrame] = grade
   }
 
   public func removeCurrentKeyframe() {
