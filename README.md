@@ -202,3 +202,51 @@ is intentionally GPR/RAW-only: it provides GPR sequence scanning, RAW previews,
 16-bit RAW luminance analysis, correction graphing, and ProRes-first movie
 export. JPEG/rendered-photo ingestion is disabled for now. A complete visual ramp
 editor and metadata-aware camera-step correction are not yet implemented.
+
+### Shared grading foundation
+
+`GoProTimelapseCore` owns `Grade` (all eight controls), `Keyframe`, `RampFile`,
+JSON coding, interpolation, exposure-correction composition, and the LibRaw
+mapping used by CLI rendering, UI previews, and UI movie export. The existing
+UI still exposes only exposure and temperature; editing those preserves the
+other controls. `UIGrade` remains a compatibility alias for `Grade`.
+
+Existing flat ramp JSON remains the encoded format; nested `grade` objects are
+also accepted, including partial grades. Missing controls use neutral defaults,
+and omitted interpolation uses the existing `smooth` default. Temperature is
+still interpolated in Kelvin, not mired. Empty ramps are neutral/as-shot; the
+UI's empty-keyframe adapter explicitly retains its historical 5200 K default.
+Unsorted anchors are accepted, duplicate frame positions use the last entry,
+and values outside the anchors hold the nearest endpoint. Exact anchors now
+retain their own optional white balance; between anchors, one specified white
+balance value is held when the other is absent.
+
+Linear ramps preserve their curve when an unchanged interpolated anchor is
+inserted. Legacy smoothstep ramps ease each segment independently, so inserting
+an anchor can change that curve; the grading editor must account for this
+rather than promising shape-preserving insertion in Smooth mode. No new editor
+controls or ramp save/load UI are included in this foundation refactor.
+
+### Shared development and encoding
+
+`RAWDeveloper` in Core owns cached GPR → DNG → LibRaw development for CLI
+rendering, UI previews/export, and sequence analysis. `RAWDevelopmentSettings`
+keeps width and denoise explicit; analysis continues to use fixed white balance,
+and preview/export retain their existing quality settings. Chroma image creation
+stays in UI.
+
+`MovieEncodingPlan` builds ProRes and HEVC/H.264 encoding arguments without
+launching FFmpeg. Both frontends share backend selection helpers, master naming,
+pixel formats, and color metadata construction. Existing differences remain
+explicit: CLI uses the `slow` software preset and video-range tagging, while UI
+uses `medium` and its existing profile/range settings. Encoder availability is
+not a hardware usability probe. `ProcessRunner` now owns non-streaming command execution and encoder discovery:
+stdout/stderr are drained concurrently, captures retain a bounded diagnostic tail,
+and task cancellation terminates the direct child (with SIGKILL escalation after
+500 ms). Output callbacks receive byte chunks and must be thread-safe and
+nonblocking. Commands that spawn descendants retaining the output pipes are not
+supported; launch FFmpeg directly rather than through a shell wrapper.
+
+Raw-frame stdin streaming, frame scheduling, and progress presentation remain in
+the frontends for a later extraction. Existing streaming-process handling is not
+yet covered by the shared runner's cancellation guarantees.

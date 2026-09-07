@@ -154,49 +154,13 @@ func parseArguments() throws -> Options? {
   return o
 }
 
-func executableURL(_ name: String) -> URL? {
-  if name.contains("/") {
-    let u = URL(fileURLWithPath: name).standardizedFileURL
-    return FileManager.default.isExecutableFile(atPath: u.path) ? u : nil
-  }
-  for path in (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":") {
-    let u = URL(fileURLWithPath: String(path)).appendingPathComponent(name)
-    if FileManager.default.isExecutableFile(atPath: u.path) { return u }
-  }
-  return nil
-}
-
 func shellQuote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-func availableEncoders(ffmpeg: URL) -> String {
-  let process = Process()
-  process.executableURL = ffmpeg
-  process.arguments = ["-hide_banner", "-encoders"]
-  let pipe = Pipe()
-  process.standardInput = FileHandle.nullDevice
-  process.standardOutput = pipe
-  process.standardError = FileHandle.nullDevice
-  do { try process.run() } catch { return "" }
-  process.waitUntilExit()
-  return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-}
-
-func runProcess(_ executable: URL, _ arguments: [String], quiet: Bool = true) throws {
-  let process = Process()
-  process.executableURL = executable
-  process.arguments = arguments
-  process.standardInput = FileHandle.nullDevice
-  if quiet {
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-  } else {
-    process.standardOutput = FileHandle.standardOutput
-    process.standardError = FileHandle.standardError
-  }
-  try process.run()
-  process.waitUntilExit()
-  guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-    throw CLIError.message("\(executable.lastPathComponent) failed (status \(process.terminationStatus))")
+func runProcess(_ executable: URL, _ arguments: [String], quiet: Bool = true) async throws {
+  _ = try await ProcessRunner.run(executable: executable, arguments: arguments) { stream, data in
+    guard !quiet else { return }
+    let handle = stream == .stdout ? FileHandle.standardOutput : FileHandle.standardError
+    try? handle.write(contentsOf: data)
   }
 }
 
@@ -374,9 +338,7 @@ func run() async throws {
     automaticCorrection = [Double](repeating: 0, count: sources.count)
   }
   func finalGrade(frame: Int) -> Grade {
-    var grade = interpolatedGrade(frame: frame, ramp: ramp)
-    grade.exposure += automaticCorrection[frame]
-    return grade
+    ramp.grade(at: frame).addingExposure(automaticCorrection[frame])
   }
   let output = URL(fileURLWithPath: o.output, relativeTo: URL(fileURLWithPath: fm.currentDirectoryPath))
     .standardizedFileURL
@@ -397,7 +359,7 @@ func run() async throws {
   print(String(format: "Video: %.2f seconds at %.3g fps → %@", Double(sources.count) / o.fps, o.fps, output.path))
   if o.dryRun { return }
 
-  guard let ffmpeg = executableURL(o.ffmpeg) else {
+  guard let ffmpeg = ProcessRunner.executableURL(o.ffmpeg) else {
     throw CLIError.message("ffmpeg not found. Install it or pass --ffmpeg /path/to/ffmpeg")
   }
   try fm.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -409,35 +371,29 @@ func run() async throws {
   try fm.createDirectory(at: frames, withIntermediateDirectories: true)
   defer { if !o.keepFrames { try? fm.removeItem(at: temporary) } }
 
-  let encoderList = availableEncoders(ffmpeg: ffmpeg)
+  let encoderList = try await ProcessRunner.availableEncoders(executable: ffmpeg)
   let videoToolboxName = o.codec == "hevc" ? "hevc_videotoolbox" : "h264_videotoolbox"
   let nvencName = o.codec == "hevc" ? "hevc_nvenc" : "h264_nvenc"
-  let selectedEncoder: String
+  let selectedEncoder: DeliveryEncoder
   switch o.encoder {
   case "videotoolbox":
     guard encoderList.contains(videoToolboxName) else {
       throw CLIError.message("ffmpeg does not provide \(videoToolboxName)")
     }
-    selectedEncoder = "videotoolbox"
+    selectedEncoder = .videotoolbox
   case "nvenc":
     guard encoderList.contains(nvencName) else { throw CLIError.message("ffmpeg does not provide \(nvencName)") }
-    selectedEncoder = "nvenc"
-  case "software": selectedEncoder = "software"
+    selectedEncoder = .nvenc
+  case "software": selectedEncoder = .software
   default:
-    if encoderList.contains(videoToolboxName) {
-      selectedEncoder = "videotoolbox"
-    } else if encoderList.contains(nvencName) {
-      selectedEncoder = "nvenc"
-    } else {
-      selectedEncoder = "software"
-    }
+    selectedEncoder = MovieEncodingPlan.deliveryEncoder(
+      codec: o.codec == "hevc" ? .hevc : .h264, available: encoderList)
   }
-  let crf = String(o.crf ?? (o.codec == "hevc" ? 20 : 18))
   let encoderDescription =
-    selectedEncoder == "videotoolbox"
-    ? "VideoToolbox (Apple hardware)" : selectedEncoder == "nvenc" ? "NVENC (GPU)" : "software (CPU)"
+    selectedEncoder == .videotoolbox
+    ? "VideoToolbox (Apple hardware)" : selectedEncoder == .nvenc ? "NVENC (GPU)" : "software (CPU)"
 
-  let proResMaster = output.deletingPathExtension().appendingPathExtension("prores.mov")
+  let proResMaster = MovieEncodingPlan.masterURL(for: output)
   if fm.fileExists(atPath: proResMaster.path) {
     if o.overwrite {
       try fm.removeItem(at: proResMaster)
@@ -445,59 +401,21 @@ func run() async throws {
       throw CLIError.message("ProRes master exists; use --overwrite: \(proResMaster.path)")
     }
   }
-  let proResEncoder: String
-  let proResEncoderDescription: String
-  if encoderList.contains("prores_videotoolbox") {
-    proResEncoder = "prores_videotoolbox"
-    proResEncoderDescription = "VideoToolbox ProRes 422 HQ"
-  } else if encoderList.contains("prores_ks") {
-    proResEncoder = "prores_ks"
-    proResEncoderDescription = "software ProRes 422 HQ"
-  } else {
+  guard let proResEncoder = MovieEncodingPlan.proResEncoder(available: encoderList) else {
     throw CLIError.message("ffmpeg does not provide prores_videotoolbox or prores_ks")
   }
+  let proResEncoderDescription = proResEncoder.description
 
   func appendProResEncoding(to args: inout [String], output: URL, filter: String? = nil) {
-    let pixelFormat = proResEncoder == "prores_videotoolbox" ? "p210le" : "yuv422p10le"
-    let proResFilter = [filter, "format=\(pixelFormat)"].compactMap { $0 }.joined(separator: ",")
-    args += ["-vf", proResFilter, "-c:v", proResEncoder, "-profile:v", "3"]
-    if proResEncoder == "prores_videotoolbox" { args += ["-allow_sw", "0"] }
-    args += [
-      "-pix_fmt", pixelFormat, "-color_range", "tv", "-colorspace", "bt709",
-      "-color_primaries", "bt709", "-color_trc", "bt709", output.path,
-    ]
+    args += MovieEncodingPlan.proResArguments(encoder: proResEncoder, output: output, filter: filter)
   }
 
   func appendVideoEncoding(to args: inout [String]) {
-    switch selectedEncoder {
-    case "videotoolbox":
-      let bitrateMbps = o.bitrate ?? (o.codec == "hevc" ? 30 : 45)
-      let bitrate = "\(bitrateMbps)M"
-      args += [
-        "-c:v", videoToolboxName, "-b:v", bitrate, "-maxrate", bitrate,
-        "-bufsize", "\(bitrateMbps * 2)M", "-allow_sw", "0",
-      ]
-    case "nvenc":
-      args += ["-c:v", nvencName, "-preset", "p6", "-rc", "vbr", "-cq", crf]
-    default:
-      args += [
-        "-c:v", o.codec == "hevc" ? "libx265" : "libx264",
-        "-preset", "slow", "-crf", crf,
-      ]
-    }
-    let deliveryPixelFormat =
-      o.codec != "hevc"
-      ? "yuv420p"
-      : selectedEncoder == "software" ? "yuv420p10le" : "p010le"
-    args += [
-      "-pix_fmt", deliveryPixelFormat, "-color_range", "tv", "-colorspace", "bt709",
-      "-color_primaries", "bt709", "-color_trc", "bt709",
-    ]
-    // FFmpeg otherwise writes HEVC in MP4 with the `hev1` sample entry.
-    // QuickTime expects `hvc1`, where parameter sets are also present in the
-    // sample description, even though it can decode the underlying stream.
-    if o.codec == "hevc" { args += ["-tag:v", "hvc1"] }
-    args += ["-movflags", "+faststart", output.path]
+    args += MovieEncodingPlan.deliveryArguments(
+      codec: o.codec == "hevc" ? .hevc : .h264,
+      encoder: selectedEncoder, output: output,
+      quality: o.crf ?? (o.codec == "hevc" ? 20 : 18),
+      bitrateMbps: o.bitrate ?? (o.codec == "hevc" ? 30 : 45))
   }
 
   if useRAW {
@@ -529,7 +447,7 @@ func run() async throws {
             do {
               try renderer.render(
                 source: item.source, destination: item.destination,
-                grade: item.grade, temporaryDirectory: temporary)
+                grade: item.grade)
             } catch {
               await state.setError(error)
             }
@@ -548,19 +466,18 @@ func run() async throws {
       args += ["-hide_banner", "-framerate", String(o.fps), "-start_number", "0", "-i", pattern]
       appendProResEncoding(to: &args, output: proResMaster)
       print("Master encoder: \(proResEncoderDescription)")
-      try runProcess(ffmpeg, args, quiet: false)
+      try await runProcess(ffmpeg, args, quiet: false)
 
       var deliveryArgs = o.overwrite ? ["-y"] : ["-n"]
       deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
       appendVideoEncoding(to: &deliveryArgs)
       print("Delivery encoder: \(encoderDescription)")
-      try runProcess(ffmpeg, deliveryArgs, quiet: false)
+      try await runProcess(ffmpeg, deliveryArgs, quiet: false)
     } else {
       // Develop the first frame before launching ffmpeg so rawvideo has
       // exact dimensions. Remaining frames are developed in parallel.
       let firstImage = try renderer.renderRGB16(
-        source: sources[0], grade: finalGrade(frame: 0),
-        temporaryDirectory: temporary)
+        source: sources[0], grade: finalGrade(frame: 0))
       let expectedBytes = firstImage.width * firstImage.height * 3 * 2
       guard firstImage.pixels.count == expectedBytes else {
         throw CLIError.message("Unexpected RGB byte count for frame 0")
@@ -630,8 +547,7 @@ func run() async throws {
             do {
               let image = try renderer.renderRGB16(
                 source: sources[index],
-                grade: finalGrade(frame: index),
-                temporaryDirectory: temporary)
+                grade: finalGrade(frame: index))
               await stream.frameCompleted(index: index, image: image)
             } catch {
               await state.setError(error)
@@ -659,7 +575,7 @@ func run() async throws {
       deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
       appendVideoEncoding(to: &deliveryArgs)
       print("Delivery encoder: \(encoderDescription)")
-      try runProcess(ffmpeg, deliveryArgs, quiet: false)
+      try await runProcess(ffmpeg, deliveryArgs, quiet: false)
     }
   } else {
     for (index, source) in sources.enumerated() {
@@ -673,13 +589,13 @@ func run() async throws {
     let scale = o.width > 0 ? "scale='min(\(o.width),iw)':-2" : "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     appendProResEncoding(to: &args, output: proResMaster, filter: scale)
     print("Master encoder: \(proResEncoderDescription)")
-    try runProcess(ffmpeg, args, quiet: false)
+    try await runProcess(ffmpeg, args, quiet: false)
 
     var deliveryArgs = o.overwrite ? ["-y"] : ["-n"]
     deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
     appendVideoEncoding(to: &deliveryArgs)
     print("Delivery encoder: \(encoderDescription)")
-    try runProcess(ffmpeg, deliveryArgs, quiet: false)
+    try await runProcess(ffmpeg, deliveryArgs, quiet: false)
   }
   print("ProRes master: \(proResMaster.path)")
   print("Done: \(output.path)")

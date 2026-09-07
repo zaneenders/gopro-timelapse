@@ -13,7 +13,7 @@ public final class TimelapseUIState {
   public var previewLabel: String?
   public var exposure: Double = 0
   public var temperature: Double = 5_200
-  public var gradeKeyframes: [Int: UIGrade] = [:]
+  public var gradeKeyframes: [Int: Grade] = [:]
   public var luminanceSamples: [LuminanceSample] = []
   public var luminanceBaseline: [Double] = []
   public var automaticExposure: [Double] = []
@@ -123,7 +123,7 @@ public final class TimelapseUIState {
     selectedFrame = index
     let grade = ExposureWorkflow.grade(at: index, keyframes: gradeKeyframes, frameCount: frames.count)
     exposure = grade.exposure
-    temperature = grade.temperature
+    temperature = grade.temperature ?? 5_200
     frameListController.scroll(to: max(0, Float(index - 2) * 52))
 
     // Selection is immediate, but LibRaw/GPR conversion is not cooperatively
@@ -139,25 +139,30 @@ public final class TimelapseUIState {
   public func adjustExposure(by delta: Double) {
     exposure = min(8, max(-8, exposure + delta))
     setCurrentKeyframe()
+    gradeKeyframes[selectedFrame]?.exposure = exposure
     status = String(format: "Keyframe %d — exposure %+.2f EV", selectedFrame + 1, exposure)
   }
 
   public func adjustTemperature(by delta: Double) {
     temperature = min(12_000, max(2_000, temperature + delta))
     setCurrentKeyframe()
+    gradeKeyframes[selectedFrame]?.temperature = temperature
     status = "Keyframe \(selectedFrame + 1) — temperature \(Int(temperature)) K"
   }
 
   public func setCurrentKeyframe() {
     guard frames.indices.contains(selectedFrame) else { return }
-    gradeKeyframes[selectedFrame] = UIGrade(exposure: exposure, temperature: temperature)
+    // Snapshot the creative grade, not the displayed controls: the temperature
+    // display uses 5200 K as a fallback for as-shot (nil) white balance.
+    gradeKeyframes[selectedFrame] = ExposureWorkflow.grade(
+      at: selectedFrame, keyframes: gradeKeyframes, frameCount: frames.count)
   }
 
   public func removeCurrentKeyframe() {
     gradeKeyframes.removeValue(forKey: selectedFrame)
     let grade = ExposureWorkflow.grade(at: selectedFrame, keyframes: gradeKeyframes, frameCount: frames.count)
     exposure = grade.exposure
-    temperature = grade.temperature
+    temperature = grade.temperature ?? 5_200
     status = "Removed keyframe \(selectedFrame + 1)."
   }
 
@@ -314,9 +319,7 @@ public final class TimelapseUIState {
       let automatic =
         automaticCorrectionEnabled && automaticExposure.indices.contains(index)
         ? automaticExposure[index] * automaticStrength : 0
-      return UIGrade(
-        exposure: creative.exposure + automatic,
-        temperature: creative.temperature)
+      return creative.addingExposure(automatic)
     }
     let sourceDirectory = URL(fileURLWithPath: sourcePath).standardizedFileURL
     let output = sourceDirectory.appendingPathComponent(
@@ -454,9 +457,7 @@ public final class TimelapseUIState {
     let automatic =
       automaticCorrectionEnabled && automaticExposure.indices.contains(index)
       ? automaticExposure[index] * automaticStrength : 0
-    let grade = PreviewGrade(
-      exposure: creativeGrade.exposure + automatic,
-      temperature: creativeGrade.temperature)
+    let grade = creativeGrade.addingExposure(automatic)
     isLoading = true
     status = "Loading \(previewSource.lastPathComponent)…"
 
@@ -517,20 +518,15 @@ public final class TimelapseUIState {
 
   nonisolated private static func renderPreview(
     source: URL,
-    grade: PreviewGrade = PreviewGrade()
+    grade: Grade = Grade(temperature: 5_200)
   ) throws -> ImageResource {
     guard source.pathExtension.lowercased() == "gpr" else {
       throw PreviewError.rawOnly
     }
 
-    let dng = try DNGCache.dng(for: source)
-    let developer = Libraw()
-    try developer.open(dng.path)
-    developer.setGrade(
-      LibrawGrade(exposure: grade.exposure, temperature: grade.temperature))
-    developer.setDenoise(0.4)
-    developer.setMaxWidth(1280)
-    let rgb = try developer.developRGB()
+    let rgb = try RAWDeveloper.developRGB(
+      source: source, grade: grade,
+      settings: .init(maximumWidth: 1280, denoise: 0.4))
 
     let pixelCount = rgb.width * rgb.height
     guard rgb.pixels.count == pixelCount * 3 else { throw PreviewError.invalidRGBData }
@@ -550,17 +546,12 @@ public final class TimelapseUIState {
       }
     }
     return try ImageResource(
-      id: ImageID("\(source.path)#raw-e\(grade.exposure)-t\(grade.temperature)"),
+      id: ImageID("\(source.path)#raw-\(grade.previewIdentity)"),
       width: rgb.width,
       height: rgb.height,
       rgba8: rgba)
   }
 
-}
-
-private struct PreviewGrade: Sendable {
-  var exposure: Double = 0
-  var temperature: Double = 5_200
 }
 
 private enum PreviewKind: Sendable {

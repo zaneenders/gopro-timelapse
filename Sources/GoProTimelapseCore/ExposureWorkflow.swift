@@ -1,14 +1,7 @@
 import Foundation
 
-public struct UIGrade: Equatable, Sendable {
-  public var exposure: Double
-  public var temperature: Double
-
-  public init(exposure: Double = 0, temperature: Double = 5_200) {
-    self.exposure = exposure
-    self.temperature = temperature
-  }
-}
+/// Compatibility name; UI and CLI now use the same complete grade.
+public typealias UIGrade = Grade
 
 public struct LuminanceSample: Codable, Equatable, Sendable {
   public var frame: Int
@@ -52,24 +45,13 @@ public struct AutomaticCorrectionSettings: Equatable, Sendable {
 public enum ExposureWorkflow {
   public static func grade(
     at frame: Int,
-    keyframes: [Int: UIGrade],
+    keyframes: [Int: Grade],
     frameCount: Int
-  ) -> UIGrade {
-    guard !keyframes.isEmpty else { return UIGrade() }
-    let positions = keyframes.keys.sorted()
-    guard let first = positions.first, let last = positions.last else { return UIGrade() }
-    if frame <= first { return keyframes[first]! }
-    if frame >= last { return keyframes[last]! }
-    let upper = positions.firstIndex(where: { $0 >= frame })!
-    let lowerFrame = positions[upper - 1]
-    let upperFrame = positions[upper]
-    let a = keyframes[lowerFrame]!
-    let b = keyframes[upperFrame]!
-    var t = Double(frame - lowerFrame) / Double(upperFrame - lowerFrame)
-    t = t * t * (3 - 2 * t)
-    return UIGrade(
-      exposure: a.exposure + (b.exposure - a.exposure) * t,
-      temperature: a.temperature + (b.temperature - a.temperature) * t)
+  ) -> Grade {
+    // Preserve the early UI's explicit daylight default. CLI neutral remains as-shot.
+    guard !keyframes.isEmpty else { return Grade(temperature: 5_200) }
+    return RampFile(keyframes: keyframes.map { Keyframe(frame: $0.key, grade: $0.value) })
+      .grade(at: frame)
   }
 
   /// Fits a robust long-term scene trend and returns a bounded, dense per-frame
