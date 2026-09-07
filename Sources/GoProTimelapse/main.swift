@@ -1,6 +1,6 @@
 import Foundation
-import GprTools
 import GoProTimelapseCore
+import GprTools
 import Libraw
 
 struct Options {
@@ -389,8 +389,10 @@ func run() async throws {
   print("Ramp: \(ramp.keyframes.count) keyframe(s), \(ramp.interpolation) interpolation")
   if let correction = o.automaticCorrection {
     let peak = automaticCorrection.map(abs).max() ?? 0
-    print(String(format: "Automatic correction: %@ at %.0f%% strength (applied peak %.3f EV)",
-      correction, o.automaticStrength * 100, peak))
+    print(
+      String(
+        format: "Automatic correction: %@ at %.0f%% strength (applied peak %.3f EV)",
+        correction, o.automaticStrength * 100, peak))
   }
   print(String(format: "Video: %.2f seconds at %.3g fps → %@", Double(sources.count) / o.fps, o.fps, output.path))
   if o.dryRun { return }
@@ -437,8 +439,11 @@ func run() async throws {
 
   let proResMaster = output.deletingPathExtension().appendingPathExtension("prores.mov")
   if fm.fileExists(atPath: proResMaster.path) {
-    if o.overwrite { try fm.removeItem(at: proResMaster) }
-    else { throw CLIError.message("ProRes master exists; use --overwrite: \(proResMaster.path)") }
+    if o.overwrite {
+      try fm.removeItem(at: proResMaster)
+    } else {
+      throw CLIError.message("ProRes master exists; use --overwrite: \(proResMaster.path)")
+    }
   }
   let proResEncoder: String
   let proResEncoderDescription: String
@@ -481,7 +486,8 @@ func run() async throws {
       ]
     }
     let deliveryPixelFormat =
-      o.codec != "hevc" ? "yuv420p"
+      o.codec != "hevc"
+      ? "yuv420p"
       : selectedEncoder == "software" ? "yuv420p10le" : "p010le"
     args += [
       "-pix_fmt", deliveryPixelFormat, "-color_range", "tv", "-colorspace", "bt709",
@@ -679,6 +685,8 @@ func run() async throws {
   print("Done: \(output.path)")
   if o.keepFrames { print("Developed frames: \(frames.path)") }
 }
+
+if let workerStatus = DNGCache.runWorkerIfRequested() { exit(workerStatus) }
 
 do { try await run() } catch {
   FileHandle.standardError.write(Data("error: \(error)\n".utf8))

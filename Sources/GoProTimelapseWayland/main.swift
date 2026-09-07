@@ -1,11 +1,17 @@
 import Chroma
+import GoProTimelapseCore
 import GoProTimelapseUI
 import WaylandBackend
 
 @main
 @MainActor
 struct GoProTimelapseWaylandApp: WaylandApp {
-  private let state = TimelapseUIState()
+  private let state: TimelapseUIState
+
+  init() {
+    DNGCache.exitIfWorkerRequested()
+    state = TimelapseUIState()
+  }
 
   var title: String { "GoPro Timelapse" }
   var windowSize: Size { Size(width: 1200, height: 800) }

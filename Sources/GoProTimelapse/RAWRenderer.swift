@@ -1,17 +1,14 @@
 import Foundation
-import GprTools
+import GoProTimelapseCore
 import Libraw
 
 struct RAWRenderer: Sendable {
   let width: Int
   let denoise: Double
 
-  private func developer(source: URL, grade: Grade, temporaryDirectory: URL) throws -> (Libraw, URL) {
-    let dng = temporaryDirectory.appendingPathComponent(
-      source.deletingPathExtension().lastPathComponent + ".dng")
+  private func developer(source: URL, grade: Grade, temporaryDirectory _: URL) throws -> Libraw {
+    let dng = try DNGCache.dng(for: source)
     do {
-      try GprTools.convert(gprFile: source.path, toDNG: dng.path)
-
       let dev = Libraw()
       try dev.open(dng.path)
       dev.setGrade(
@@ -27,22 +24,19 @@ struct RAWRenderer: Sendable {
         ))
       dev.setDenoise(denoise)
       dev.setMaxWidth(width)
-      return (dev, dng)
+      return dev
     } catch {
-      try? FileManager.default.removeItem(at: dng)
       throw error
     }
   }
 
   func render(source: URL, destination: URL, grade: Grade, temporaryDirectory: URL) throws {
-    let (dev, dng) = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
-    defer { try? FileManager.default.removeItem(at: dng) }
+    let dev = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
     try dev.developPNG(to: destination.path)
   }
 
   func renderRGB16(source: URL, grade: Grade, temporaryDirectory: URL) throws -> LibrawRGB16Image {
-    let (dev, dng) = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
-    defer { try? FileManager.default.removeItem(at: dng) }
+    let dev = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
     return try dev.developRGB16()
   }
 }

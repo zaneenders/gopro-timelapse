@@ -1,6 +1,5 @@
 import Foundation
 import GoProTimelapseCore
-import GprTools
 import Libraw
 import Synchronization
 
@@ -43,141 +42,7 @@ private final class ProcessOutputCapture: Sendable {
   func append(_ text: String) { storage.withLock { $0.append(text) } }
 }
 
-private final class FFmpegProgressParser: Sendable {
-  private struct State: Sendable {
-    var pending = ""
-    var lastFrame = 0
-  }
-
-  private let storage = Mutex(State())
-
-  func append(_ text: String) -> Int? {
-    storage.withLock { state in
-      state.pending += text
-      let lines = state.pending.split(separator: "\n", omittingEmptySubsequences: false)
-      state.pending = lines.last.map(String.init) ?? ""
-      var latest: Int?
-      for line in lines.dropLast() {
-        guard line.hasPrefix("frame="),
-          let frame = Int(line.dropFirst("frame=".count)), frame > state.lastFrame
-        else { continue }
-        state.lastFrame = frame
-        latest = frame
-      }
-      return latest
-    }
-  }
-}
-
 enum MovieRenderer {
-  static func renderProxyPreview(
-    sources: [URL],
-    grades: [UIGrade],
-    output: URL,
-    settings: MovieRenderSettings,
-    progress: @escaping @Sendable (Int) -> Void,
-    outputHandler: @escaping ProcessOutputHandler
-  ) throws -> MovieRenderMetrics {
-    let start = ContinuousClock.now
-    guard !sources.isEmpty, sources.count == grades.count else {
-      throw MovieRenderError.invalidSequence
-    }
-    guard !sources.contains(where: { $0.pathExtension.lowercased() == "gpr" }) else {
-      throw MovieRenderError.missingProxy
-    }
-    let ffmpeg = try ffmpegURL()
-    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "gopro-timelapse-proxy-movie-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: temporary) }
-
-    // Keep each proxy's real filename/extension. A synthetic `.img` sequence is
-    // interpreted as GEM by newer FFmpeg releases instead of being content-probed.
-    // The concat demuxer supports mixed JPEG/PNG/TIFF inputs without disguising them.
-    let frameList = temporary.appendingPathComponent("frames.txt")
-    let frameDuration = 1 / settings.fps
-    var frameLines = sources.flatMap { source in
-      [
-        "file '\(escapeConcatPath(source.path))'",
-        String(format: "duration %.12f", frameDuration),
-      ]
-    }
-    // concat applies the final duration only when another file follows it. Repeat
-    // the last entry and cap output to the real frame count below.
-    frameLines.append("file '\(escapeConcatPath(sources[sources.count - 1].path))'")
-    try (frameLines.joined(separator: "\n") + "\n").write(
-      to: frameList, atomically: true, encoding: .utf8)
-
-    let commands = temporary.appendingPathComponent("exposure.txt")
-    let lines = grades.indices.map { index in
-      let time = Double(index) / settings.fps
-      let exposure = min(3, max(-3, grades[index].exposure))
-      return String(format: "%.6f exposure exposure %.6f;", time, exposure)
-    }
-    try (lines.joined(separator: "\n") + "\n").write(
-      to: commands, atomically: true, encoding: .utf8)
-
-    try FileManager.default.createDirectory(
-      at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-    let filter =
-      "sendcmd=f='\(escapeFilterPath(commands.path))',exposure@exposure=0,scale='min(\(settings.maximumWidth),iw)':-2"
-    let encoderList = availableEncoders(ffmpeg)
-    let encoder: String
-    let process = Process()
-    process.executableURL = ffmpeg
-    var arguments = [
-      "-y", "-v", "error", "-progress", "pipe:1", "-nostats",
-      "-r", String(settings.fps),
-      "-f", "concat", "-safe", "0", "-i", frameList.path,
-      "-vf", filter, "-fps_mode", "cfr", "-r", String(settings.fps),
-      "-frames:v", String(sources.count),
-    ]
-    #if os(macOS)
-    if encoderList.contains("h264_videotoolbox") {
-      encoder = "VideoToolbox H.264"
-      arguments += ["-c:v", "h264_videotoolbox", "-b:v", "3M", "-allow_sw", "1"]
-    } else {
-      encoder = "libx264"
-      arguments += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "30"]
-    }
-    #else
-    if encoderList.contains("h264_nvenc") {
-      encoder = "NVENC H.264"
-      arguments += ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "30"]
-    } else {
-      encoder = "libx264"
-      arguments += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "30"]
-    }
-    #endif
-    arguments += [
-      "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709",
-      "-color_trc", "bt709", "-movflags", "+faststart", output.path,
-    ]
-    process.arguments = arguments
-    process.standardInput = FileHandle.nullDevice
-    outputHandler(.system, commandDescription(executable: ffmpeg, arguments: arguments))
-    let progressParser = FFmpegProgressParser()
-    let captured = try runCapturingOutput(
-      process,
-      outputHandler: { stream, text in
-        guard stream == .stdout else {
-          outputHandler(stream, text)
-          return
-        }
-        if let completed = progressParser.append(text) {
-          progress(min(completed, sources.count))
-        }
-      })
-    guard process.terminationStatus == 0 else {
-      throw MovieRenderError.ffmpegFailed(
-        captured.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-    progress(sources.count)
-    return metrics(
-      start: start, sources: sources, output: output, settings: settings,
-      encoder: encoder, source: "JPEG proxies")
-  }
-
   static func render(
     sources: [URL],
     grades: [UIGrade],
@@ -366,11 +231,9 @@ enum MovieRenderer {
   }
 
   private static func develop16(
-    source: URL, grade: UIGrade, width: Int, denoise: Double, temporary: URL
+    source: URL, grade: UIGrade, width: Int, denoise: Double, temporary _: URL
   ) throws -> LibrawRGB16Image {
-    let dng = temporary.appendingPathComponent("frame-\(UUID().uuidString).dng")
-    defer { try? FileManager.default.removeItem(at: dng) }
-    try GprTools.convert(gprFile: source.path, toDNG: dng.path)
+    let dng = try DNGCache.dng(for: source)
     let developer = Libraw()
     try developer.open(dng.path)
     developer.setGrade(
@@ -479,17 +342,6 @@ enum MovieRenderer {
     return String(data: data, encoding: .utf8) ?? ""
   }
 
-  private static func escapeConcatPath(_ path: String) -> String {
-    // FFmpeg concat files use shell-style single-quoted paths.
-    path.replacingOccurrences(of: "'", with: "'\\''")
-  }
-
-  private static func escapeFilterPath(_ path: String) -> String {
-    path.replacingOccurrences(of: "\\", with: "\\\\")
-      .replacingOccurrences(of: ":", with: "\\:")
-      .replacingOccurrences(of: "'", with: "\\'")
-  }
-
   private static func ffmpegURL() throws -> URL {
     var directories = (ProcessInfo.processInfo.environment["PATH"] ?? "")
       .split(separator: ":").map(String.init)
@@ -507,7 +359,6 @@ enum MovieRenderer {
 enum MovieRenderError: Error, CustomStringConvertible {
   case invalidSequence
   case rawOnly
-  case missingProxy
   case invalidRGBData
   case inconsistentDimensions
   case ffmpegNotFound
@@ -518,7 +369,6 @@ enum MovieRenderError: Error, CustomStringConvertible {
     switch self {
     case .invalidSequence: "The render sequence is empty or has inconsistent grades."
     case .rawOnly: "Movie rendering currently requires a GPR sequence."
-    case .missingProxy: "Quick Preview requires a paired JPEG or rendered frame for every GPR."
     case .invalidRGBData: "LibRaw returned an invalid RGB frame."
     case .inconsistentDimensions: "Developed frames have inconsistent dimensions."
     case .ffmpegNotFound: "ffmpeg was not found on PATH."
