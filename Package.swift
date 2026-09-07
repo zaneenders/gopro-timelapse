@@ -39,7 +39,6 @@ var targets: [Target] = [
     dependencies: ["GoProTimelapseCore"]
   ),
   .testTarget(name: "GoProTimelapseCoreTests", dependencies: ["GoProTimelapseCore"]),
-  .testTarget(name: "GoProTimelapseTests", dependencies: ["GoProTimelapse"]),
   .testTarget(
     name: "GoProTimelapseUITests",
     dependencies: ["GoProTimelapseUI", "GoProTimelapseCore"]),

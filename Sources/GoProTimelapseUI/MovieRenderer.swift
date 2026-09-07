@@ -45,7 +45,7 @@ private final class ProcessOutputCapture: Sendable {
 enum MovieRenderer {
   static func render(
     sources: [URL],
-    grades: [UIGrade],
+    grades: [Grade],
     output: URL,
     settings: MovieRenderSettings,
     progress: @escaping @Sendable (Int) -> Void,
@@ -231,13 +231,13 @@ enum MovieRenderer {
   }
 
   private static func develop16(
-    source: URL, grade: UIGrade, width: Int, denoise: Double, temporary _: URL
+    source: URL, grade: Grade, width: Int, denoise: Double, temporary _: URL
   ) throws -> LibrawRGB16Image {
     let dng = try DNGCache.dng(for: source)
     let developer = Libraw()
     try developer.open(dng.path)
     developer.setGrade(
-      LibrawGrade(exposure: grade.exposure, temperature: grade.temperature))
+      grade.librawGrade)
     developer.setDenoise(denoise)
     developer.setMaxWidth(width)
     return try developer.developRGB16()

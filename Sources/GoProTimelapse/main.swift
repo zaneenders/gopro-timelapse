@@ -374,9 +374,7 @@ func run() async throws {
     automaticCorrection = [Double](repeating: 0, count: sources.count)
   }
   func finalGrade(frame: Int) -> Grade {
-    var grade = interpolatedGrade(frame: frame, ramp: ramp)
-    grade.exposure += automaticCorrection[frame]
-    return grade
+    ramp.grade(at: frame).addingExposure(automaticCorrection[frame])
   }
   let output = URL(fileURLWithPath: o.output, relativeTo: URL(fileURLWithPath: fm.currentDirectoryPath))
     .standardizedFileURL

@@ -10,7 +10,7 @@ import Testing
   ]
   let middle = ExposureWorkflow.grade(at: 50, keyframes: keys, frameCount: 101)
   #expect(abs(middle.exposure - 1) < 0.0001)
-  #expect(abs(middle.temperature - 5_000) < 0.0001)
+  #expect(middle.temperature == 5_000)
 }
 
 @Test func automaticCorrectionReducesIsolatedFlickerWithoutFlatteningTrend() {

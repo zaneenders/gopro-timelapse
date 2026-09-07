@@ -1,21 +1,59 @@
 import Foundation
 
-struct Grade: Codable, Equatable, Sendable {
-  var exposure: Double = 0
-  var temperature: Double? = nil
-  var tint: Double? = nil
-  var contrast: Double = 1
-  var saturation: Double = 1
-  var vibrance: Double = 0
-  var shadows: Double = 0
-  var highlights: Double = 0
+public struct Grade: Codable, Hashable, Sendable {
+  public var exposure: Double = 0
+  public var temperature: Double? = nil
+  public var tint: Double? = nil
+  public var contrast: Double = 1
+  public var saturation: Double = 1
+  public var vibrance: Double = 0
+  public var shadows: Double = 0
+  public var highlights: Double = 0
+  public init(
+    exposure: Double = 0,
+    temperature: Double? = nil,
+    tint: Double? = nil,
+    contrast: Double = 1,
+    saturation: Double = 1,
+    vibrance: Double = 0,
+    shadows: Double = 0,
+    highlights: Double = 0
+  ) {
+    self.exposure = exposure
+    self.temperature = temperature
+    self.tint = tint
+    self.contrast = contrast
+    self.saturation = saturation
+    self.vibrance = vibrance
+    self.shadows = shadows
+    self.highlights = highlights
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    exposure = try c.decodeIfPresent(Double.self, forKey: .exposure) ?? 0
+    temperature = try c.decodeIfPresent(Double.self, forKey: .temperature)
+    tint = try c.decodeIfPresent(Double.self, forKey: .tint)
+    contrast = try c.decodeIfPresent(Double.self, forKey: .contrast) ?? 1
+    saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 1
+    vibrance = try c.decodeIfPresent(Double.self, forKey: .vibrance) ?? 0
+    shadows = try c.decodeIfPresent(Double.self, forKey: .shadows) ?? 0
+    highlights = try c.decodeIfPresent(Double.self, forKey: .highlights) ?? 0
+  }
+
+  /// Adds deflicker without changing the creative color grade.
+  public func addingExposure(_ correction: Double) -> Grade {
+    var result = self
+    result.exposure += correction
+    return result
+  }
 }
 
-struct Keyframe: Codable, Equatable {
-  var frame: Int
-  var grade: Grade
+public struct Keyframe: Codable, Equatable, Sendable {
+  public var frame: Int
+  public var grade: Grade
 
-  init(
+  public init(
     frame: Int, exposure: Double = 0, temperature: Double? = nil, tint: Double? = nil,
     contrast: Double = 1, saturation: Double = 1, vibrance: Double = 0,
     shadows: Double = 0, highlights: Double = 0
@@ -27,11 +65,16 @@ struct Keyframe: Codable, Equatable {
       shadows: shadows, highlights: highlights)
   }
 
+  public init(frame: Int, grade: Grade) {
+    self.frame = frame
+    self.grade = grade
+  }
+
   enum CodingKeys: String, CodingKey {
     case frame, grade, exposure, temperature, tint, contrast, saturation, vibrance, shadows, highlights
   }
 
-  init(from decoder: Decoder) throws {
+  public init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     frame = try c.decode(Int.self, forKey: .frame)
     if let nested = try c.decodeIfPresent(Grade.self, forKey: .grade) {
@@ -50,7 +93,7 @@ struct Keyframe: Codable, Equatable {
     }
   }
 
-  func encode(to encoder: Encoder) throws {
+  public func encode(to encoder: Encoder) throws {
     var c = encoder.container(keyedBy: CodingKeys.self)
     try c.encode(frame, forKey: .frame)
     try c.encode(grade.exposure, forKey: .exposure)
@@ -64,13 +107,34 @@ struct Keyframe: Codable, Equatable {
   }
 }
 
-struct RampFile: Codable {
-  var interpolation: String = "smooth"
-  var keyframes: [Keyframe]
+public struct RampFile: Codable, Equatable, Sendable {
+  public var interpolation: String = "smooth"
+  public var keyframes: [Keyframe]
+
+  public init(interpolation: String = "smooth", keyframes: [Keyframe]) {
+    self.interpolation = interpolation
+    self.keyframes = keyframes
+  }
+
+  public init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    interpolation = try c.decodeIfPresent(String.self, forKey: .interpolation) ?? "smooth"
+    keyframes = try c.decode([Keyframe].self, forKey: .keyframes)
+  }
+
+  public func grade(at frame: Int) -> Grade {
+    interpolatedGrade(frame: frame, ramp: self)
+  }
 }
 
-func interpolatedGrade(frame: Int, ramp: RampFile) -> Grade {
-  let keys = ramp.keyframes.sorted { $0.frame < $1.frame }
+public func interpolatedGrade(frame: Int, ramp: RampFile) -> Grade {
+  // Resolve duplicates deterministically: the last entry in the file wins.
+  var byFrame: [Int: Grade] = [:]
+  for key in ramp.keyframes { byFrame[key.frame] = key.grade }
+  let keys = byFrame.map { Keyframe(frame: $0.key, grade: $0.value) }
+    .sorted { $0.frame < $1.frame }
+  // Exact anchors retain nil white balance, rather than borrowing a neighbor's.
+  if let exact = byFrame[frame] { return exact }
   guard let first = keys.first else { return Grade() }
   guard frame > first.frame else { return first.grade }
   guard let last = keys.last, frame < last.frame else { return keys.last!.grade }
