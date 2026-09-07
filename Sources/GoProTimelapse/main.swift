@@ -47,7 +47,7 @@ func usage() {
           --source <auto|gpr|jpg> Prefer paired GPR RAW or rendered photos (default: auto)
           --ramp <file.json>     Keyframed exposure/color ramp
           --init-ramp <file>     Write a starter ramp, use it, and continue rendering
-           --keep-frames          Keep developed PNG frames beside the output
+           --keep-frames          Keep developed 16-bit PPM frames beside the output
       -j, --jobs <number>         Parallel RAW workers (default: all cores)
           --denoise <0...1>       Chroma noise reduction (default: 0.7; 0 disables)
           --analyze <file.json>  Analyze GPR frames in parallel, write correction, and exit
@@ -508,7 +508,7 @@ func run() async throws {
     if o.keepFrames {
       var pending: [(source: URL, destination: URL, grade: Grade)] = []
       for (index, source) in sources.enumerated() {
-        let destination = frames.appendingPathComponent(String(format: "%08d.png", index))
+        let destination = frames.appendingPathComponent(String(format: "%08d.ppm", index))
         if fm.fileExists(atPath: destination.path) {
           if o.overwrite { try fm.removeItem(at: destination) } else { continue }
         }
@@ -543,7 +543,7 @@ func run() async throws {
       if let error = await state.error() { throw error }
       print()
 
-      let pattern = frames.appendingPathComponent("%08d.png").path
+      let pattern = frames.appendingPathComponent("%08d.ppm").path
       var args = o.overwrite ? ["-y"] : ["-n"]
       args += ["-hide_banner", "-framerate", String(o.fps), "-start_number", "0", "-i", pattern]
       appendProResEncoding(to: &args, output: proResMaster)
