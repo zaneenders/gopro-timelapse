@@ -1,29 +1,31 @@
 import Foundation
-import GprTools
 import Libraw
 
 public struct SequenceAnalysisSettings: Sendable {
   public var jobs: Int
   public var maximumWidth: Int
   public var denoise: Double
+  public var temperature: Double
   public var correction: AutomaticCorrectionSettings
 
   public init(
     jobs: Int = 0,
     maximumWidth: Int = 640,
-    denoise: Double = 0.4,
+    denoise: Double = 0.7,
+    temperature: Double = 5_200,
     correction: AutomaticCorrectionSettings = AutomaticCorrectionSettings()
   ) {
     self.jobs = jobs
     self.maximumWidth = maximumWidth
     self.denoise = denoise
+    self.temperature = temperature
     self.correction = correction
   }
 }
 
 public enum SequenceAnalyzer {
-  /// Analyzes GPR files with a fixed RAW development path. This is the same
-  /// source domain used by final RAW rendering; paired camera JPEGs are not used.
+  /// Converts each GPR to DNG and analyzes a fixed 16-bit LibRaw development.
+  /// This is the same source domain used by ProRes rendering; JPEGs are not used.
   public static func analyzeGPR(
     sources: [URL],
     settings: SequenceAnalysisSettings = SequenceAnalysisSettings(),
@@ -42,7 +44,7 @@ public enum SequenceAnalyzer {
           try Task.checkCancellation()
           let sample = try analyzeGPR(
             source: sources[index], frame: index, maximumWidth: settings.maximumWidth,
-            denoise: settings.denoise)
+            denoise: settings.denoise, temperature: settings.temperature)
           let completed = await state.store(sample)
           progress(completed, sources.count)
         }
@@ -66,34 +68,30 @@ public enum SequenceAnalyzer {
     return (
       samples,
       AutomaticCorrectionFile(
-        baseline: result.baseline, correction: result.correction, settings: settings.correction))
+        baseline: result.baseline, correction: result.correction, settings: settings.correction)
+    )
   }
 
   private static func analyzeGPR(
-    source: URL, frame: Int, maximumWidth: Int, denoise: Double
+    source: URL, frame: Int, maximumWidth: Int, denoise: Double, temperature: Double
   ) throws -> LuminanceSample {
-    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "gopro-analysis-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: temporary) }
-    let dng = temporary.appendingPathComponent("frame.dng")
-    try GprTools.convert(gprFile: source.path, toDNG: dng.path)
+    let dng = try DNGCache.dng(for: source)
     let developer = Libraw()
     try developer.open(dng.path)
-    // Fixed development settings across the entire sequence. Temperature zero
-    // currently asks LibRaw for camera WB; a fixed multiplier API is future work.
-    developer.setGrade(LibrawGrade())
+    // Lock white balance for the entire sequence. Per-frame camera WB can
+    // otherwise turn chroma changes into apparent luminance flicker.
+    developer.setGrade(LibrawGrade(temperature: temperature))
     developer.setDenoise(denoise)
     developer.setMaxWidth(maximumWidth)
-    let image = try developer.developRGB()
+    let image = try developer.developRGB16()
     return luminance(
-      width: image.width, height: image.height, rgb24: image.pixels, frame: frame)
+      width: image.width, height: image.height, rgb48LE: image.pixels, frame: frame)
   }
 
   private static func luminance(
-    width: Int, height: Int, rgb24: Data, frame: Int
+    width: Int, height: Int, rgb48LE: Data, frame: Int
   ) -> LuminanceSample {
-    guard width > 0, height > 0, rgb24.count >= width * height * 3 else {
+    guard width > 0, height > 0, rgb48LE.count >= width * height * 3 * 2 else {
       return LuminanceSample(frame: frame, medianLogLuminance: 0, clippedHighlightFraction: 0)
     }
     let x0 = Int(Double(width) * 0.15)
@@ -104,22 +102,25 @@ public enum SequenceAnalyzer {
     var values: [Double] = []
     var clipped = 0
     var count = 0
-    rgb24.withUnsafeBytes { bytes in
+    rgb48LE.withUnsafeBytes { bytes in
       let pixels = bytes.bindMemory(to: UInt8.self)
+      func sample(_ byteOffset: Int) -> UInt16 {
+        UInt16(pixels[byteOffset]) | (UInt16(pixels[byteOffset + 1]) << 8)
+      }
       for y in Swift.stride(from: y0, to: min(y1, height), by: sampleStride) {
         for x in Swift.stride(from: x0, to: min(x1, width), by: sampleStride) {
-          let offset = (y * width + x) * 3
-          let r8 = pixels[offset]
-          let g8 = pixels[offset + 1]
-          let b8 = pixels[offset + 2]
-          if max(r8, max(g8, b8)) >= 250 { clipped += 1 }
+          let offset = (y * width + x) * 3 * 2
+          let r16 = sample(offset)
+          let g16 = sample(offset + 2)
+          let b16 = sample(offset + 4)
+          if max(r16, max(g16, b16)) >= 64_250 { clipped += 1 }
           func linear(_ value: Double) -> Double {
             value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
           }
           let luminance =
-            0.2126 * linear(Double(r8) / 255)
-            + 0.7152 * linear(Double(g8) / 255)
-            + 0.0722 * linear(Double(b8) / 255)
+            0.2126 * linear(Double(r16) / 65_535)
+            + 0.7152 * linear(Double(g16) / 65_535)
+            + 0.0722 * linear(Double(b16) / 65_535)
           values.append(log2(max(luminance, 1e-6)))
           count += 1
         }
@@ -127,9 +128,11 @@ public enum SequenceAnalyzer {
     }
     values.sort()
     let middle = values.count / 2
-    let median = values.isEmpty ? 0
+    let median =
+      values.isEmpty
+      ? 0
       : values.count.isMultiple(of: 2)
-      ? (values[middle - 1] + values[middle]) / 2 : values[middle]
+        ? (values[middle - 1] + values[middle]) / 2 : values[middle]
     return LuminanceSample(
       frame: frame, medianLogLuminance: median,
       clippedHighlightFraction: count == 0 ? 0 : Double(clipped) / Double(count))

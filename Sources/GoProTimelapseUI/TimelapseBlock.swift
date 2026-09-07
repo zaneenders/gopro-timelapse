@@ -1,7 +1,6 @@
 import Chroma
 import Foundation
 import GoProTimelapseCore
-import GprTools
 import Libraw
 import Synchronization
 
@@ -22,11 +21,12 @@ public final class TimelapseUIState {
   public var automaticStrength: Double = 1
   public var analysisProgress = 0.0
   public var isAnalyzing = false
+  public let workerCount = DNGCache.maximumWorkerCount
   public var renderProgress = 0.0
   public var isRendering = false
   public var lastMovieURL: URL?
   public var renderSummaryLines: [String] = []
-  public var status = "Choose a folder containing GPR or rendered photo frames."
+  public var status = "Choose a folder containing GPR frames."
   public var consoleLines = ["[system] Ready. Process output will appear here."]
   public var isConsoleVisible = false
   public var isRenderMenuVisible = false
@@ -38,7 +38,6 @@ public final class TimelapseUIState {
   private var previewTask: Task<Void, Never>?
   private var analysisTask: Task<Void, Never>?
   private var renderTask: Task<Void, Never>?
-  private var previewSources: [URL: URL] = [:]
 
   public init(sourcePath: String = FileManager.default.currentDirectoryPath) {
     self.sourcePath = sourcePath
@@ -86,7 +85,6 @@ public final class TimelapseUIState {
     selectedFrame = 0
     preview = nil
     previewLabel = nil
-    previewSources = [:]
     status = "Scanning \(directory.path)…"
 
     Task { [weak self] in
@@ -97,24 +95,22 @@ public final class TimelapseUIState {
       await MainActor.run {
         guard let self, self.loadGeneration == generation else { return }
         switch result {
-        case .success(let frames, let previewSources, let isRAW):
+        case .success(let frames):
           self.frames = frames
-          self.previewSources = previewSources
           self.selectedFrame = 0
           self.preview = nil
           self.previewLabel = nil
           if frames.isEmpty {
             self.isLoading = false
-            self.status = "No GPR, JPEG, PNG, or TIFF frames found."
+            self.status = "No GPR frames found."
           } else {
-            self.status = "Found \(frames.count) \(isRAW ? "GPR RAW" : "rendered") frames."
+            self.status = "Found \(frames.count) GPR RAW frames."
             self.startPreview(for: 0)
           }
         case .failure(let message):
           self.frames = []
           self.preview = nil
           self.previewLabel = nil
-          self.previewSources = [:]
           self.isLoading = false
           self.status = message
         }
@@ -193,125 +189,89 @@ public final class TimelapseUIState {
 
   public func analyzeLuminance() {
     guard !frames.isEmpty, !isAnalyzing else { return }
+    guard frames.allSatisfy({ $0.pathExtension.lowercased() == "gpr" }) else {
+      status = "Analysis requires a GPR sequence."
+      return
+    }
     analysisTask?.cancel()
-    let sources = frames.map { previewSources[$0] ?? $0 }
+    let sources = frames
     isAnalyzing = true
     analysisProgress = 0
     luminanceSamples = []
     luminanceBaseline = []
     automaticExposure = []
-    // A new analysis invalidates the currently displayed developed preview.
     preview = nil
     previewLabel = nil
-    status = "Analyzing luminance 0/\(sources.count)…"
+    status = "Analyzing GPR/DNG luminance 0/\(sources.count)…"
     appendConsole(
       .system,
-      "Starting fresh luminance analysis for \(sources.count) frames; no analysis cache is used.\n")
+      "Starting accurate GPR → DNG → LibRaw analysis for \(sources.count) frames with \(workerCount) workers.\n")
 
     analysisTask = Task { [weak self] in
-      // Decoding dominates this pass. Keep several independent frames in flight,
-      // but bound the group so thousands of frames do not create thousands of
-      // ffmpeg processes or unbounded RGBA buffers.
-      let concurrency = min(sources.count, max(2, min(8, ProcessInfo.processInfo.activeProcessorCount / 2)))
-      var orderedSamples = [LuminanceSample?](repeating: nil, count: sources.count)
-      var completed = 0
-      var nextIndex = 0
-      var failure: (index: Int, message: String)?
-
-      await withTaskGroup(of: AnalysisResult.self) { group in
-        func enqueue(_ index: Int) {
-          let source = sources[index]
-          group.addTask(priority: .userInitiated) {
-            guard !Task.isCancelled else {
-              return .failure(index: index, message: "Analysis cancelled.")
-            }
-            do {
-              let image = try Self.renderPreview(source: source)
-              let sample = ExposureWorkflow.luminance(of: image, frame: index)
-              return .success(sample)
-            } catch {
-              return .failure(index: index, message: String(describing: error))
-            }
+      guard let self else { return }
+      let progressState = RenderProgressState()
+      let monitor = Task { [weak self] in
+        while !Task.isCancelled {
+          let completed = progressState.completed
+          await MainActor.run {
+            guard let self else { return }
+            self.analysisProgress = Double(completed) / Double(sources.count)
+            self.status = "Analyzing GPR/DNG luminance \(completed)/\(sources.count)…"
           }
-        }
-
-        while nextIndex < concurrency {
-          enqueue(nextIndex)
-          nextIndex += 1
-        }
-
-        while let result = await group.next() {
-          guard !Task.isCancelled else {
-            group.cancelAll()
-            return
-          }
-          switch result {
-          case .success(let sample):
-            orderedSamples[sample.frame] = sample
-            completed += 1
-            let source = sources[sample.frame]
-            self?.appendConsole(
-              .system,
-              String(
-                format: "Analyzed %d/%d (frame %d: %@) — luminance %.3f EV, highlights %.2f%%\n",
-                completed, sources.count, sample.frame + 1, source.lastPathComponent,
-                sample.medianLogLuminance, sample.clippedHighlightFraction * 100))
-            if let self {
-              self.analysisProgress = Double(completed) / Double(sources.count)
-              self.status = "Analyzing luminance \(completed)/\(sources.count)…"
-            }
-          case .failure(let failedIndex, let message):
-            failure = (failedIndex, message)
-            group.cancelAll()
-            return
-          }
-
-          if nextIndex < sources.count {
-            enqueue(nextIndex)
-            nextIndex += 1
-          }
+          try? await Task.sleep(for: .milliseconds(150))
         }
       }
-
+      // Use utility priority so conversion/development cannot starve UI drawing.
+      let result = await Task.detached(priority: .utility) {
+        do {
+          let settings = SequenceAnalysisSettings(
+            jobs: self.workerCount,
+            maximumWidth: 640,
+            denoise: 0.7,
+            temperature: 5_200)
+          let analysis = try await SequenceAnalyzer.analyzeGPR(
+            sources: sources, settings: settings
+          ) { completed, _ in
+            progressState.completed = completed
+          }
+          return GPRAnalysisResult.success(analysis.samples, analysis.correction)
+        } catch {
+          return GPRAnalysisResult.failure(String(describing: error))
+        }
+      }.value
+      monitor.cancel()
       guard !Task.isCancelled else { return }
-      if let failure {
-        let source = sources[failure.index]
-        self?.appendConsole(
-          .stderr,
-          "Analysis failed at frame \(failure.index + 1) (\(source.lastPathComponent)): \(failure.message)\n")
-        self?.isAnalyzing = false
-        self?.status = "Analysis failed at frame \(failure.index + 1): \(failure.message)"
-        return
+      await MainActor.run {
+        self.isAnalyzing = false
+        switch result {
+        case .success(let samples, let correction):
+          self.analysisProgress = 1
+          self.luminanceSamples = samples
+          self.luminanceBaseline = correction.baseline
+          self.automaticExposure = correction.correction
+          let correctionURL = URL(fileURLWithPath: self.sourcePath).standardizedFileURL
+            .appendingPathComponent("automatic-correction.json")
+          do {
+            try correction.write(to: correctionURL)
+            self.appendConsole(.system, "Wrote RAW correction: \(correctionURL.path)\n")
+          } catch {
+            self.appendConsole(.stderr, "Unable to write RAW correction: \(error)\n")
+          }
+          self.automaticCorrectionEnabled = true
+          let peak = correction.correction.map(abs).max() ?? 0
+          self.status = String(
+            format: "Analyzed %d GPR/DNG frames (peak correction %.2f EV).",
+            samples.count, peak)
+          self.appendConsole(
+            .system,
+            String(
+              format: "Accurate RAW analysis complete — %d frames, peak %.2f EV.\n",
+              samples.count, peak))
+        case .failure(let message):
+          self.status = "RAW analysis failed: \(message)"
+          self.appendConsole(.stderr, "RAW analysis failed: \(message)\n")
+        }
       }
-
-      let samples = orderedSamples.compactMap { $0 }
-      guard let self, samples.count == sources.count else { return }
-      self.luminanceSamples = samples
-      let correction = ExposureWorkflow.automaticCorrection(samples: samples)
-      self.luminanceBaseline = correction.baseline
-      self.automaticExposure = correction.correction
-      do {
-        let correctionURL = URL(fileURLWithPath: self.sourcePath).standardizedFileURL
-          .appendingPathComponent("automatic-correction.json")
-        try AutomaticCorrectionFile(
-          baseline: correction.baseline, correction: correction.correction
-        ).write(to: correctionURL)
-        self.appendConsole(.system, "Wrote automatic correction: \(correctionURL.path)\n")
-      } catch {
-        self.appendConsole(.stderr, "Unable to write automatic correction: \(error)\n")
-      }
-      self.automaticCorrectionEnabled = true
-      self.isAnalyzing = false
-      self.analysisProgress = 1
-      let peak = correction.correction.map(abs).max() ?? 0
-      self.status = String(
-        format: "Analyzed %d frames and generated correction (peak %.2f EV).",
-        samples.count, peak)
-      self.appendConsole(
-        .system,
-        String(
-          format: "Analysis complete — %d frames, correction peak %.2f EV.\n",
-          samples.count, peak))
     }
   }
 
@@ -347,10 +307,7 @@ public final class TimelapseUIState {
       return
     }
     guard !isAnalyzing, !isRendering else { return }
-    let sources =
-      preview
-      ? frames.map { previewSources[$0] ?? $0 }
-      : frames
+    let sources = frames
     let grades = frames.indices.map { index in
       let creative = ExposureWorkflow.grade(
         at: index, keyframes: gradeKeyframes, frameCount: frames.count)
@@ -365,7 +322,7 @@ public final class TimelapseUIState {
     let output = sourceDirectory.appendingPathComponent(
       preview ? "timelapse-preview.mp4" : "timelapse-render.mp4")
     let settings = MovieRenderSettings(
-      maximumWidth: preview ? 960 : 3_840,
+      maximumWidth: preview ? 960 : 0,
       fps: 30,
       preview: preview)
     isRendering = true
@@ -392,17 +349,10 @@ public final class TimelapseUIState {
       let result = await Task.detached(priority: .userInitiated) {
         do {
           let metrics: MovieRenderMetrics
-          if preview {
-            metrics = try MovieRenderer.renderProxyPreview(
-              sources: sources, grades: grades, output: output, settings: settings,
-              progress: { completed in progressState.completed = completed },
-              outputHandler: { stream, text in self.appendConsole(stream, text) })
-          } else {
-            metrics = try await MovieRenderer.render(
-              sources: sources, grades: grades, output: output, settings: settings,
-              progress: { completed in progressState.completed = completed },
-              outputHandler: { stream, text in self.appendConsole(stream, text) })
-          }
+          metrics = try await MovieRenderer.render(
+            sources: sources, grades: grades, output: output, settings: settings,
+            progress: { completed in progressState.completed = completed },
+            outputHandler: { stream, text in self.appendConsole(stream, text) })
           return RenderResult.success(output, metrics: metrics)
         } catch {
           return RenderResult.failure(String(describing: error))
@@ -497,10 +447,8 @@ public final class TimelapseUIState {
     loadGeneration &+= 1
     let generation = loadGeneration
     let source = frames[index]
-    let previewSource = forceRAW ? source : previewSources[source] ?? source
-    let previewKind: PreviewKind =
-      previewSource == source && source.pathExtension.lowercased() == "gpr"
-      ? .rawDeveloped : .renderedProxy
+    let previewSource = source
+    let previewKind: PreviewKind = .rawDeveloped
     let creativeGrade = ExposureWorkflow.grade(
       at: index, keyframes: gradeKeyframes, frameCount: frames.count)
     let automatic =
@@ -555,23 +503,7 @@ public final class TimelapseUIState {
         includingPropertiesForKeys: [.isRegularFileKey],
         options: [.skipsHiddenFiles])
       let gprs = sortedFrames(contents, extensions: ["gpr"])
-      let rendered = sortedFrames(
-        contents, extensions: ["jpg", "jpeg", "png", "tif", "tiff"])
-      guard !gprs.isEmpty else {
-        return .success(
-          frames: rendered,
-          previewSources: Dictionary(uniqueKeysWithValues: rendered.map { ($0, $0) }),
-          isRAW: false)
-      }
-      let renderedByStem = Dictionary(
-        rendered.map { ($0.deletingPathExtension().lastPathComponent.lowercased(), $0) },
-        uniquingKeysWith: { first, _ in first })
-      let previewSources = Dictionary(
-        uniqueKeysWithValues: gprs.map { raw in
-          let stem = raw.deletingPathExtension().lastPathComponent.lowercased()
-          return (raw, renderedByStem[stem] ?? raw)
-        })
-      return .success(frames: gprs, previewSources: previewSources, isRAW: true)
+      return .success(frames: gprs)
     } catch {
       return .failure("Unable to scan folder: \(error)")
     }
@@ -588,16 +520,10 @@ public final class TimelapseUIState {
     grade: PreviewGrade = PreviewGrade()
   ) throws -> ImageResource {
     guard source.pathExtension.lowercased() == "gpr" else {
-      return try decodeRenderedPreview(source: source)
+      throw PreviewError.rawOnly
     }
 
-    let temporaryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "gopro-timelapse-preview-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
-
-    let dng = temporaryDirectory.appendingPathComponent("preview.dng")
-    try GprTools.convert(gprFile: source.path, toDNG: dng.path)
+    let dng = try DNGCache.dng(for: source)
     let developer = Libraw()
     try developer.open(dng.path)
     developer.setGrade(
@@ -630,63 +556,6 @@ public final class TimelapseUIState {
       rgba8: rgba)
   }
 
-  nonisolated private static func decodeRenderedPreview(source: URL) throws -> ImageResource {
-    let process = Process()
-    process.executableURL = try ffmpegURL()
-    process.arguments = [
-      "-v", "error", "-i", source.path,
-      "-vf", "scale='min(1280,iw)':-2",
-      "-frames:v", "1", "-f", "image2pipe", "-vcodec", "pam", "-pix_fmt", "rgba", "-",
-    ]
-    process.standardInput = FileHandle.nullDevice
-    let outputPipe = Pipe()
-    let errorPipe = Pipe()
-    process.standardOutput = outputPipe
-    process.standardError = errorPipe
-    try process.run()
-    let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-      let detail =
-        String(
-          data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-      throw PreviewError.ffmpegFailed(detail.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    // PAM carries dimensions in a short ASCII header followed by tightly packed
-    // RGBA bytes, allowing one ffmpeg process without a platform image decoder.
-    let marker = Data("ENDHDR\n".utf8)
-    guard let markerRange = data.range(of: marker),
-      let header = String(data: data[..<markerRange.upperBound], encoding: .utf8)
-    else { throw PreviewError.invalidPAM }
-    var width: Int?
-    var height: Int?
-    for line in header.split(separator: "\n") {
-      let fields = line.split(separator: " ", maxSplits: 1)
-      guard fields.count == 2 else { continue }
-      if fields[0] == "WIDTH" { width = Int(fields[1]) }
-      if fields[0] == "HEIGHT" { height = Int(fields[1]) }
-    }
-    guard let width, let height else { throw PreviewError.invalidPAM }
-    let pixels = Data(data[markerRange.upperBound...])
-    return try ImageResource(
-      id: ImageID(source.path), width: width, height: height, rgba8: pixels)
-  }
-
-  nonisolated private static func ffmpegURL() throws -> URL {
-    var directories = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-      .split(separator: ":").map(String.init)
-    #if os(macOS)
-    // GUI apps launched from Finder inherit a minimal PATH without Homebrew.
-    directories += ["/opt/homebrew/bin", "/usr/local/bin"]
-    #endif
-    for directory in directories {
-      let candidate = URL(fileURLWithPath: directory).appendingPathComponent("ffmpeg")
-      if FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
-    }
-    throw PreviewError.ffmpegNotFound
-  }
-
 }
 
 private struct PreviewGrade: Sendable {
@@ -695,19 +564,13 @@ private struct PreviewGrade: Sendable {
 }
 
 private enum PreviewKind: Sendable {
-  case renderedProxy
   case rawDeveloped
 
-  var label: String {
-    switch self {
-    case .renderedProxy: "JPEG proxy"
-    case .rawDeveloped: "RAW developed"
-    }
-  }
+  var label: String { "GPR → DNG → LibRaw" }
 }
 
 private enum ScanResult: Sendable {
-  case success(frames: [URL], previewSources: [URL: URL], isRAW: Bool)
+  case success(frames: [URL])
   case failure(String)
 }
 
@@ -716,9 +579,9 @@ private enum PreviewResult: Sendable {
   case failure(String)
 }
 
-private enum AnalysisResult: Sendable {
-  case success(LuminanceSample)
-  case failure(index: Int, message: String)
+private enum GPRAnalysisResult: Sendable {
+  case success([LuminanceSample], AutomaticCorrectionFile)
+  case failure(String)
 }
 
 private final class RenderProgressState: Sendable {
@@ -737,20 +600,14 @@ private enum RenderResult: Sendable {
 
 private enum PreviewError: Error, CustomStringConvertible {
   case invalidRGBData
-  case invalidPAM
-  case ffmpegNotFound
-  case ffmpegFailed(String)
+  case rawOnly
 
   var description: String {
     switch self {
     case .invalidRGBData:
       "LibRaw returned an unexpected RGB buffer."
-    case .invalidPAM:
-      "ffmpeg returned an invalid PAM preview image."
-    case .ffmpegNotFound:
-      "ffmpeg was not found on PATH."
-    case .ffmpegFailed(let detail):
-      detail.isEmpty ? "ffmpeg could not decode the preview image." : detail
+    case .rawOnly:
+      "Preview requires a GPR frame."
     }
   }
 }
@@ -931,17 +788,21 @@ public struct TimelapseBlock: Block {
             if state.isConsoleVisible { state.consoleController.scrollToBottom() }
           }
           Button(
-            state.luminanceSamples.isEmpty ? "Analyze" : "Reanalyze",
+            state.luminanceSamples.isEmpty ? "Analyze GPR/DNG" : "Reanalyze GPR/DNG",
             id: WidgetID("action.analyze"), fontScale: 0.62
           ) {
             state.analyzeLuminance()
           }
           if state.isAnalyzing {
-            Text(String(format: "%.0f%%", state.analysisProgress * 100))
-              .fontScale(0.56)
-              .foregroundColor(theme.warning)
+            Text(
+              String(
+                format: "%.0f%% • %d workers",
+                state.analysisProgress * 100, state.workerCount)
+            )
+            .fontScale(0.56)
+            .foregroundColor(theme.warning)
           } else if !state.luminanceSamples.isEmpty {
-            Text("Correction generated automatically")
+            Text("RAW correction generated")
               .fontScale(0.56)
               .foregroundColor(theme.positive)
           }
@@ -964,7 +825,7 @@ public struct TimelapseBlock: Block {
             Spacer()
             VStack(spacing: 4) {
               Button(
-                state.canRender ? "Proxy Transcode (960p)" : "Proxy Transcode (960p) 🔒",
+                state.canRender ? "Quick RAW Preview (960 px)" : "Quick RAW Preview (960 px) 🔒",
                 id: WidgetID("render.preview"), fontScale: 0.56,
                 style: state.canRender ? nil : lockedButtonStyle(theme: theme)
               ) {
@@ -972,7 +833,7 @@ public struct TimelapseBlock: Block {
                 state.renderMovie(preview: true)
               }
               Button(
-                state.canRender ? "RAW Develop + Encode (4K)" : "RAW Develop + Encode (4K) 🔒",
+                state.canRender ? "RAW → ProRes HQ → HEVC (Original Size)" : "RAW → ProRes HQ → HEVC 🔒",
                 id: WidgetID("render.final"), fontScale: 0.56,
                 style: state.canRender ? nil : lockedButtonStyle(theme: theme)
               ) {
@@ -1013,10 +874,14 @@ public struct TimelapseBlock: Block {
           .fontFace(.display)
           .foregroundColor(theme.secondaryForeground)
         Spacer()
-        Text(state.isAnalyzing ? "● ANALYZING" : state.isRendering ? "● RENDERING" : "● IDLE")
-          .fontScale(0.5)
-          .fontFace(.display)
-          .foregroundColor(state.isAnalyzing || state.isRendering ? theme.warning : theme.positive)
+        Text(
+          state.isAnalyzing
+            ? "● ANALYZING • \(state.workerCount) WORKERS"
+            : state.isRendering ? "● RENDERING" : "● IDLE"
+        )
+        .fontScale(0.5)
+        .fontFace(.display)
+        .foregroundColor(state.isAnalyzing || state.isRendering ? theme.warning : theme.positive)
       }
       LazyVStack(
         id: WidgetID("process.output"),
@@ -1055,6 +920,9 @@ public struct TimelapseBlock: Block {
         .fontScale(0.58)
         .foregroundColor(theme.secondaryForeground)
       Spacer()
+      Text("\(state.workerCount) workers")
+        .fontScale(0.52)
+        .foregroundColor(theme.secondaryForeground)
     }
     .padding(10)
     .background(theme.elevatedSurface)

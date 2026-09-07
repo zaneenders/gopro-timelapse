@@ -1,13 +1,13 @@
 import Foundation
-import GprTools
 import GoProTimelapseCore
+import GprTools
 import Libraw
 
 struct Options {
   var input = FileManager.default.currentDirectoryPath
   var output = "timelapse.mp4"
   var fps = 30.0
-  var width = 3840
+  var width = 0
   var codec = "hevc"
   var encoder = "auto"
   var crf: Int?
@@ -37,7 +37,7 @@ enum CLIError: Error, CustomStringConvertible, Sendable {
 func usage() {
   print(
     """
-    gopro-timelapse — develop GoPro RAW photos with keyframed ramps, then encode an MP4
+    gopro-timelapse — develop GoPro RAW photos to ProRes, then encode a delivery MP4
 
     USAGE
       gopro-timelapse [options]
@@ -47,7 +47,7 @@ func usage() {
           --source <auto|gpr|jpg> Prefer paired GPR RAW or rendered photos (default: auto)
           --ramp <file.json>     Keyframed exposure/color ramp
           --init-ramp <file>     Write a starter ramp, use it, and continue rendering
-           --keep-frames          Keep developed PNG frames beside the output
+           --keep-frames          Keep developed 16-bit PPM frames beside the output
       -j, --jobs <number>         Parallel RAW workers (default: all cores)
           --denoise <0...1>       Chroma noise reduction (default: 0.7; 0 disables)
           --analyze <file.json>  Analyze GPR frames in parallel, write correction, and exit
@@ -57,9 +57,9 @@ func usage() {
                                  Automatic correction strength (default: 1; 2 is diagnostic)
 
     VIDEO
-      -o, --output <file>        Output movie (default: timelapse.mp4)
+      -o, --output <file>        Delivery movie; also writes <name>.prores.mov
       -r, --fps <number>         Frames per second (default: 30)
-      -w, --width <pixels>       Maximum width; 0 keeps source size (default: 3840)
+      -w, --width <pixels>       Maximum width; 0 keeps source size (default: 0)
       -c, --codec <h264|hevc>    Video codec (default: hevc)
       -e, --encoder <auto|software|videotoolbox|nvenc>
                                  Encoder: auto-detect hardware or select a backend (default: auto)
@@ -70,10 +70,9 @@ func usage() {
           --dry-run              Inspect the plan without rendering
       -h, --help                 Show this help
 
-    RAW mode converts .GPR to standard DNG with the GPR SDK (swift-gpr_tools),
-    develops it using LibRaw (swift-libraw), and interpolates exposure, white
-    balance, contrast, saturation, vibrance, shadows, and highlights between
-    keyframes.
+    RAW mode converts .GPR to standard DNG, develops and grades it as 16-bit
+    RGB, writes a 10-bit ProRes 422 HQ master, then transcodes that master to
+    the selected delivery codec.
     """)
 }
 
@@ -239,7 +238,7 @@ actor RenderState {
 actor RGBFrameStream {
   private let total: Int
   private let maxOutstanding: Int
-  private var completed: [Int: LibrawRGBImage] = [:]
+  private var completed: [Int: LibrawRGB16Image] = [:]
   private var nextWriteIndex: Int
   private var outstanding = 0
   private var cancelled = false
@@ -252,7 +251,7 @@ actor RGBFrameStream {
     self.maxOutstanding = max(1, maxOutstanding)
   }
 
-  func nextFrameToWrite() async -> LibrawRGBImage? {
+  func nextFrameToWrite() async -> LibrawRGB16Image? {
     while true {
       if let image = completed.removeValue(forKey: nextWriteIndex) {
         nextWriteIndex += 1
@@ -263,7 +262,7 @@ actor RGBFrameStream {
     }
   }
 
-  func frameCompleted(index: Int, image: LibrawRGBImage) async {
+  func frameCompleted(index: Int, image: LibrawRGB16Image) async {
     // Always admit the next required frame so out-of-order completions cannot
     // fill the buffer and deadlock the writer waiting for that exact index.
     while !cancelled && outstanding >= maxOutstanding && index != nextWriteIndex {
@@ -390,8 +389,10 @@ func run() async throws {
   print("Ramp: \(ramp.keyframes.count) keyframe(s), \(ramp.interpolation) interpolation")
   if let correction = o.automaticCorrection {
     let peak = automaticCorrection.map(abs).max() ?? 0
-    print(String(format: "Automatic correction: %@ at %.0f%% strength (applied peak %.3f EV)",
-      correction, o.automaticStrength * 100, peak))
+    print(
+      String(
+        format: "Automatic correction: %@ at %.0f%% strength (applied peak %.3f EV)",
+        correction, o.automaticStrength * 100, peak))
   }
   print(String(format: "Video: %.2f seconds at %.3g fps → %@", Double(sources.count) / o.fps, o.fps, output.path))
   if o.dryRun { return }
@@ -436,6 +437,37 @@ func run() async throws {
     selectedEncoder == "videotoolbox"
     ? "VideoToolbox (Apple hardware)" : selectedEncoder == "nvenc" ? "NVENC (GPU)" : "software (CPU)"
 
+  let proResMaster = output.deletingPathExtension().appendingPathExtension("prores.mov")
+  if fm.fileExists(atPath: proResMaster.path) {
+    if o.overwrite {
+      try fm.removeItem(at: proResMaster)
+    } else {
+      throw CLIError.message("ProRes master exists; use --overwrite: \(proResMaster.path)")
+    }
+  }
+  let proResEncoder: String
+  let proResEncoderDescription: String
+  if encoderList.contains("prores_videotoolbox") {
+    proResEncoder = "prores_videotoolbox"
+    proResEncoderDescription = "VideoToolbox ProRes 422 HQ"
+  } else if encoderList.contains("prores_ks") {
+    proResEncoder = "prores_ks"
+    proResEncoderDescription = "software ProRes 422 HQ"
+  } else {
+    throw CLIError.message("ffmpeg does not provide prores_videotoolbox or prores_ks")
+  }
+
+  func appendProResEncoding(to args: inout [String], output: URL, filter: String? = nil) {
+    let pixelFormat = proResEncoder == "prores_videotoolbox" ? "p210le" : "yuv422p10le"
+    let proResFilter = [filter, "format=\(pixelFormat)"].compactMap { $0 }.joined(separator: ",")
+    args += ["-vf", proResFilter, "-c:v", proResEncoder, "-profile:v", "3"]
+    if proResEncoder == "prores_videotoolbox" { args += ["-allow_sw", "0"] }
+    args += [
+      "-pix_fmt", pixelFormat, "-color_range", "tv", "-colorspace", "bt709",
+      "-color_primaries", "bt709", "-color_trc", "bt709", output.path,
+    ]
+  }
+
   func appendVideoEncoding(to args: inout [String]) {
     switch selectedEncoder {
     case "videotoolbox":
@@ -453,8 +485,12 @@ func run() async throws {
         "-preset", "slow", "-crf", crf,
       ]
     }
+    let deliveryPixelFormat =
+      o.codec != "hevc"
+      ? "yuv420p"
+      : selectedEncoder == "software" ? "yuv420p10le" : "p010le"
     args += [
-      "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace", "bt709",
+      "-pix_fmt", deliveryPixelFormat, "-color_range", "tv", "-colorspace", "bt709",
       "-color_primaries", "bt709", "-color_trc", "bt709",
     ]
     // FFmpeg otherwise writes HEVC in MP4 with the `hev1` sample entry.
@@ -472,7 +508,7 @@ func run() async throws {
     if o.keepFrames {
       var pending: [(source: URL, destination: URL, grade: Grade)] = []
       for (index, source) in sources.enumerated() {
-        let destination = frames.appendingPathComponent(String(format: "%08d.png", index))
+        let destination = frames.appendingPathComponent(String(format: "%08d.ppm", index))
         if fm.fileExists(atPath: destination.path) {
           if o.overwrite { try fm.removeItem(at: destination) } else { continue }
         }
@@ -507,19 +543,25 @@ func run() async throws {
       if let error = await state.error() { throw error }
       print()
 
-      let pattern = frames.appendingPathComponent("%08d.png").path
+      let pattern = frames.appendingPathComponent("%08d.ppm").path
       var args = o.overwrite ? ["-y"] : ["-n"]
       args += ["-hide_banner", "-framerate", String(o.fps), "-start_number", "0", "-i", pattern]
-      appendVideoEncoding(to: &args)
-      print("Encoder: \(encoderDescription)")
+      appendProResEncoding(to: &args, output: proResMaster)
+      print("Master encoder: \(proResEncoderDescription)")
       try runProcess(ffmpeg, args, quiet: false)
+
+      var deliveryArgs = o.overwrite ? ["-y"] : ["-n"]
+      deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
+      appendVideoEncoding(to: &deliveryArgs)
+      print("Delivery encoder: \(encoderDescription)")
+      try runProcess(ffmpeg, deliveryArgs, quiet: false)
     } else {
       // Develop the first frame before launching ffmpeg so rawvideo has
       // exact dimensions. Remaining frames are developed in parallel.
-      let firstImage = try renderer.renderRGB(
+      let firstImage = try renderer.renderRGB16(
         source: sources[0], grade: finalGrade(frame: 0),
         temporaryDirectory: temporary)
-      let expectedBytes = firstImage.width * firstImage.height * 3
+      let expectedBytes = firstImage.width * firstImage.height * 3 * 2
       guard firstImage.pixels.count == expectedBytes else {
         throw CLIError.message("Unexpected RGB byte count for frame 0")
       }
@@ -528,25 +570,25 @@ func run() async throws {
       ffProcess.executableURL = ffmpeg
       var args = o.overwrite ? ["-y"] : ["-n"]
       args += [
-        "-hide_banner", "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-hide_banner", "-f", "rawvideo", "-pixel_format", "rgb48le",
         "-video_size", "\(firstImage.width)x\(firstImage.height)",
         "-framerate", String(o.fps), "-i", "-",
       ]
-      appendVideoEncoding(to: &args)
+      appendProResEncoding(to: &args, output: proResMaster)
       ffProcess.arguments = args
       let inputPipe = Pipe()
       ffProcess.standardInput = inputPipe
       ffProcess.standardOutput = FileHandle.standardOutput
       ffProcess.standardError = FileHandle.standardError
       try ffProcess.run()
-      print("Encoder: \(encoderDescription)")
+      print("Master encoder: \(proResEncoderDescription)")
 
       let writeHandle = inputPipe.fileHandleForWriting
       let state = RenderState()
       await state.setDone(1)
       let total = sources.count
-      // RGB24 is about 24 MB at 4K. Keep only a small bounded reorder
-      // queue while allowing all workers to continue processing.
+      // RGB48 is about 50 MB at 4K. Keep only a small bounded reorder
+      // queue while allowing RAW workers to continue processing.
       let stream = RGBFrameStream(total: total, startIndex: 1, maxOutstanding: 3)
       let limiter = AsyncLimiter(limit: workerCount)
 
@@ -586,7 +628,7 @@ func run() async throws {
           group.addTask {
             defer { Task { await limiter.release() } }
             do {
-              let image = try renderer.renderRGB(
+              let image = try renderer.renderRGB16(
                 source: sources[index],
                 grade: finalGrade(frame: index),
                 temporaryDirectory: temporary)
@@ -609,9 +651,15 @@ func run() async throws {
       }
       ffProcess.waitUntilExit()
       guard ffProcess.terminationStatus == 0 else {
-        throw CLIError.message("ffmpeg failed (status \(ffProcess.terminationStatus))")
+        throw CLIError.message("ProRes encoding failed (status \(ffProcess.terminationStatus))")
       }
       print()
+
+      var deliveryArgs = o.overwrite ? ["-y"] : ["-n"]
+      deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
+      appendVideoEncoding(to: &deliveryArgs)
+      print("Delivery encoder: \(encoderDescription)")
+      try runProcess(ffmpeg, deliveryArgs, quiet: false)
     }
   } else {
     for (index, source) in sources.enumerated() {
@@ -623,14 +671,22 @@ func run() async throws {
     var args = o.overwrite ? ["-y"] : ["-n"]
     args += ["-hide_banner", "-framerate", String(o.fps), "-start_number", "0", "-i", pattern]
     let scale = o.width > 0 ? "scale='min(\(o.width),iw)':-2" : "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    args += ["-vf", scale]
-    appendVideoEncoding(to: &args)
-    print("Encoder: \(encoderDescription)")
+    appendProResEncoding(to: &args, output: proResMaster, filter: scale)
+    print("Master encoder: \(proResEncoderDescription)")
     try runProcess(ffmpeg, args, quiet: false)
+
+    var deliveryArgs = o.overwrite ? ["-y"] : ["-n"]
+    deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
+    appendVideoEncoding(to: &deliveryArgs)
+    print("Delivery encoder: \(encoderDescription)")
+    try runProcess(ffmpeg, deliveryArgs, quiet: false)
   }
+  print("ProRes master: \(proResMaster.path)")
   print("Done: \(output.path)")
   if o.keepFrames { print("Developed frames: \(frames.path)") }
 }
+
+if let workerStatus = DNGCache.runWorkerIfRequested() { exit(workerStatus) }
 
 do { try await run() } catch {
   FileHandle.standardError.write(Data("error: \(error)\n".utf8))

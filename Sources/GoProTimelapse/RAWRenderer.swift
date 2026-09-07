@@ -1,17 +1,14 @@
 import Foundation
-import GprTools
+import GoProTimelapseCore
 import Libraw
 
 struct RAWRenderer: Sendable {
   let width: Int
   let denoise: Double
 
-  private func developer(source: URL, grade: Grade, temporaryDirectory: URL) throws -> (Libraw, URL) {
-    let dng = temporaryDirectory.appendingPathComponent(
-      source.deletingPathExtension().lastPathComponent + ".dng")
+  private func developer(source: URL, grade: Grade, temporaryDirectory _: URL) throws -> Libraw {
+    let dng = try DNGCache.dng(for: source)
     do {
-      try GprTools.convert(gprFile: source.path, toDNG: dng.path)
-
       let dev = Libraw()
       try dev.open(dng.path)
       dev.setGrade(
@@ -27,22 +24,43 @@ struct RAWRenderer: Sendable {
         ))
       dev.setDenoise(denoise)
       dev.setMaxWidth(width)
-      return (dev, dng)
+      return dev
     } catch {
-      try? FileManager.default.removeItem(at: dng)
       throw error
     }
   }
 
   func render(source: URL, destination: URL, grade: Grade, temporaryDirectory: URL) throws {
-    let (dev, dng) = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
-    defer { try? FileManager.default.removeItem(at: dng) }
-    try dev.developPNG(to: destination.path)
+    let image = try renderRGB16(
+      source: source, grade: grade, temporaryDirectory: temporaryDirectory)
+    try Self.writePPM16(image, to: destination)
   }
 
-  func renderRGB(source: URL, grade: Grade, temporaryDirectory: URL) throws -> LibrawRGBImage {
-    let (dev, dng) = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
-    defer { try? FileManager.default.removeItem(at: dng) }
-    return try dev.developRGB()
+  /// P6 PPM stores 16-bit samples in network (big-endian) byte order.
+  /// Keep all sample bits; PNG development in the LibRaw bridge is only 8-bit.
+  static func writePPM16(_ image: LibrawRGB16Image, to destination: URL) throws {
+    guard image.width > 0, image.height > 0,
+      image.pixels.count.isMultiple(of: 6),
+      image.pixels.count / 6 / image.width == image.height,
+      image.pixels.count / 6 % image.width == 0
+    else { throw CLIError.message("Invalid RGB16 frame dimensions or byte count") }
+
+    var pixels = image.pixels
+    pixels.withUnsafeMutableBytes { bytes in
+      let samples = bytes.bindMemory(to: UInt8.self)
+      for offset in stride(from: 0, to: samples.count, by: 2) {
+        let low = samples[offset]
+        samples[offset] = samples[offset + 1]
+        samples[offset + 1] = low
+      }
+    }
+    var data = Data("P6\n\(image.width) \(image.height)\n65535\n".utf8)
+    data.append(pixels)
+    try data.write(to: destination, options: .atomic)
+  }
+
+  func renderRGB16(source: URL, grade: Grade, temporaryDirectory: URL) throws -> LibrawRGB16Image {
+    let dev = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
+    return try dev.developRGB16()
   }
 }

@@ -1,11 +1,17 @@
 import Chroma
+import GoProTimelapseCore
 import GoProTimelapseUI
 import MetalBackend
 
 @main
 @MainActor
 struct GoProTimelapseMacApp: MetalApp {
-  private let state = TimelapseUIState()
+  private let state: TimelapseUIState
+
+  init() {
+    DNGCache.exitIfWorkerRequested()
+    state = TimelapseUIState()
+  }
 
   var title: String { "GoPro Timelapse" }
   var windowSize: Size { Size(width: 1200, height: 800) }

@@ -1,5 +1,5 @@
 {
-  "originHash" : "a1b2bb9470cabcd76f25a96871dbf3501d29d19c8d9bf27f9e6817c087884bd2",
+  "originHash" : "9ac92510ecca15ec5ec608c164311e9a8675ce915d8dda942075f041f2b7ec52",
   "pins" : [
     {
       "identity" : "chroma",
@@ -25,7 +25,7 @@
       "location" : "https://github.com/zaneenders/swift-libraw.git",
       "state" : {
         "branch" : "main",
-        "revision" : "dfb06e2b6c68c989b0c7f95a98988e0eb864277b"
+        "revision" : "3c526151628a72c0146c87d704e8feeed872b5d2"
       }
     }
   ],

@@ -1,8 +1,9 @@
 # GoPro Timelapse
 
 A Swift CLI that converts GoPro `.GPR` RAW frames, develops them with LibRaw,
-applies an interpolated grading ramp, and encodes an MP4 with ffmpeg. Source
-photos are read-only and are never modified.
+applies an interpolated grading ramp, writes a 10-bit ProRes 422 HQ master, and
+transcodes that master to an MP4 with ffmpeg. Source photos are read-only and
+are never modified.
 
 ## Requirements
 
@@ -141,12 +142,15 @@ and shadows and vibrance conventionally in `-1...1`.
 
 - `--source gpr|jpg|auto` — choose RAW, rendered photos, or automatic selection
 - `--denoise 0...1` — RAW chroma denoising; default `0.7`, `0` disables it
+- `--width N` — maximum render width; default `0` preserves source dimensions
 - `--jobs N` — limit parallel RAW analysis/render workers
 - `--analyze FILE` — analyze GPR frames in parallel, write correction JSON, and exit
 - `--automatic-correction FILE` — apply a saved dense per-frame correction
 - `--automatic-strength 0...2` — scale the saved correction; default `1`
-- `--keep-frames` — retain developed PNG frames
-- `--encoder auto|software|videotoolbox|nvenc` — choose the video encoder
+- `--keep-frames` — retain lossless 16-bit PPM frames (used to encode the master; existing 8-bit PNGs are not reused)
+- GPR conversions persist under `<source>/.gopro-timelapse/dng`; delete that folder to rebuild the DNG cache
+- Final renders retain a same-basename `.prores.mov` 10-bit ProRes 422 HQ master
+- `--encoder auto|software|videotoolbox|nvenc` — choose the HEVC/H.264 delivery encoder
 - `--bitrate N` — VideoToolbox bitrate in Mbps
 - `--crf N` — software/NVENC quality
 - `--overwrite` — replace existing output (and an `--init-ramp` file)
@@ -171,22 +175,30 @@ On Linux with a Wayland session:
 swift run gopro-timelapse-wayland
 ```
 
-Enter a source directory and press **Load**. The current UI scans and lists GPR
-or rendered photo frames. When a GPR has a same-basename JPEG beside it, the UI
-uses that JPEG as a fast browsing proxy; otherwise it develops a RAW preview.
-Rendered photos are decoded portably through ffmpeg. Use `j`/`k` to move to the
-next/previous frame; Command-Up/Down on macOS or Super-Up/Down on Linux jumps
-to the first/last frame. Previews are decoded again when selected rather than
-reused from an image cache. Analyze measures all frames and writes
-`automatic-correction.json`; movie export applies the generated correction.
+Enter a source directory and press **Load**. The UI currently accepts GPR
+sequences only. Every selected-frame preview and every luminance measurement
+uses the same GPR → temporary DNG → LibRaw development domain as final output;
+paired camera JPEGs are deliberately ignored. Converted DNGs are retained in
+`.gopro-timelapse/dng` inside the source folder and reused by previews, analysis,
+and subsequent renders when the source GPR has not changed. Analysis therefore
+resumes conversion after an app restart, including recovery of a completed DNG
+whose metadata sidecar had not yet been written. Dedicated headless GPR worker
+processes scale to the system's active CPU count while populating the cache in
+parallel, avoiding both UI relaunches and the SDK's process-global XMP
+concurrency limitation. Use `j`/`k` to move
+to the next/previous frame; Command-Up/Down on macOS or Super-Up/Down on Linux
+jumps to the first/last frame. Analyze develops 16-bit RAW proxies for all
+frames and writes `automatic-correction.json`. Final export applies that
+correction while creating a source-size 10-bit ProRes 422 HQ master followed by
+HEVC Main 10.
 
 ## Current scope
 
-Implemented in the shared Core and CLI: GPR-to-DNG conversion, LibRaw
+Implemented in the shared Core and CLI: GPR-to-DNG conversion, 16-bit LibRaw
 development, exposure and color controls, keyframe interpolation, parallel RAW
-analysis and processing, robust luminance-based correction files, and ffmpeg
-encoding. Implemented in the early UI: source entry, sequence scanning, a frame
-list, selection, paired-JPEG proxy previews, rendered-photo previews, RAW
-fallback previews, luminance analysis, correction graphing, and movie export.
-A complete visual ramp editor and metadata-aware camera-step correction are not
-yet implemented.
+analysis and processing, robust luminance-based correction files, 10-bit ProRes
+master generation, and HEVC/H.264 delivery encoding with ffmpeg. The early UI
+is intentionally GPR/RAW-only: it provides GPR sequence scanning, RAW previews,
+16-bit RAW luminance analysis, correction graphing, and ProRes-first movie
+export. JPEG/rendered-photo ingestion is disabled for now. A complete visual ramp
+editor and metadata-aware camera-step correction are not yet implemented.
