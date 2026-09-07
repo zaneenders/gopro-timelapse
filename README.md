@@ -54,6 +54,53 @@ swift run -c release gopro-timelapse \
 
 Add `--dry-run` to inspect the render plan without creating a video.
 
+## Analyze and render on a server
+
+The graphical **Analyze** action writes `automatic-correction.json` into the
+source folder. The CLI can also perform accurate parallel analysis directly
+from GPR files instead of using the camera JPEG proxies. On the server, run:
+
+```sh
+cd /path/to/gopro-timelapse
+swift run -c release gopro-timelapse \
+  --input /path/to/sequence \
+  --source gpr \
+  --jobs 16 \
+  --analyze /path/to/sequence/automatic-correction.json
+```
+
+`--analyze` writes the correction file and exits without rendering a movie.
+Adjust `--jobs` for the number of concurrent RAW analysis workers appropriate
+for the server.
+
+Then render using that correction file:
+
+```sh
+cd /path/to/gopro-timelapse
+swift run -c release gopro-timelapse \
+  --input /path/to/sequence \
+  --source gpr \
+  --ramp /path/to/ramp.json \
+  --automatic-correction /path/to/sequence/automatic-correction.json \
+  --automatic-strength 1 \
+  --jobs 16 \
+  --fps 30 \
+  --width 3840 \
+  --codec hevc \
+  --encoder nvenc \
+  --crf 20 \
+  --overwrite \
+  --output /path/to/timelapse.mp4
+```
+
+Use `--encoder software` if the server does not have an NVIDIA GPU or its
+ffmpeg build does not provide NVENC. `--encoder auto` selects an available
+backend automatically.
+
+Use `--automatic-strength 2` only for an exaggerated diagnostic render to
+confirm that the correction is visible. It scales the saved correction and
+does not rerun analysis.
+
 ## Ramp format
 
 Frames are zero-based. `interpolation` can be `smooth` (default) or `linear`.
@@ -94,7 +141,10 @@ and shadows and vibrance conventionally in `-1...1`.
 
 - `--source gpr|jpg|auto` — choose RAW, rendered photos, or automatic selection
 - `--denoise 0...1` — RAW chroma denoising; default `0.7`, `0` disables it
-- `--jobs N` — limit parallel RAW workers
+- `--jobs N` — limit parallel RAW analysis/render workers
+- `--analyze FILE` — analyze GPR frames in parallel, write correction JSON, and exit
+- `--automatic-correction FILE` — apply a saved dense per-frame correction
+- `--automatic-strength 0...2` — scale the saved correction; default `1`
 - `--keep-frames` — retain developed PNG frames
 - `--encoder auto|software|videotoolbox|nvenc` — choose the video encoder
 - `--bitrate N` — VideoToolbox bitrate in Mbps
@@ -104,9 +154,39 @@ and shadows and vibrance conventionally in `-1...1`.
 
 Run `swift run gopro-timelapse --help` for the complete CLI reference.
 
+## Graphical UI (early preview)
+
+The Chroma UI builds and runs directly with Swift Package Manager; no Xcode
+project is required. SwiftPM resolves the remote Chroma `display-images` branch.
+
+On macOS:
+
+```sh
+swift run gopro-timelapse-mac
+```
+
+On Linux with a Wayland session:
+
+```sh
+swift run gopro-timelapse-wayland
+```
+
+Enter a source directory and press **Load**. The current UI scans and lists GPR
+or rendered photo frames. When a GPR has a same-basename JPEG beside it, the UI
+uses that JPEG as a fast browsing proxy; otherwise it develops a RAW preview.
+Rendered photos are decoded portably through ffmpeg. Use `j`/`k` to move to the
+next/previous frame; Command-Up/Down on macOS or Super-Up/Down on Linux jumps
+to the first/last frame. Previews are decoded again when selected rather than
+reused from an image cache. Analyze measures all frames and writes
+`automatic-correction.json`; movie export applies the generated correction.
+
 ## Current scope
 
-Implemented: GPR-to-DNG conversion, LibRaw development, exposure and color
-controls, keyframe interpolation, parallel RAW processing, and ffmpeg encoding.
-Automatic luminance analysis, deflickering, previews, and a visual ramp editor
-are not yet implemented.
+Implemented in the shared Core and CLI: GPR-to-DNG conversion, LibRaw
+development, exposure and color controls, keyframe interpolation, parallel RAW
+analysis and processing, robust luminance-based correction files, and ffmpeg
+encoding. Implemented in the early UI: source entry, sequence scanning, a frame
+list, selection, paired-JPEG proxy previews, rendered-photo previews, RAW
+fallback previews, luminance analysis, correction graphing, and movie export.
+A complete visual ramp editor and metadata-aware camera-step correction are not
+yet implemented.
