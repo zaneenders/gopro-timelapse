@@ -88,7 +88,7 @@ let package = Package(
     .package(url: "git@github.com:zaneenders/swift-gpr_tools.git", branch: "main"),
     .package(
       url: "https://github.com/zaneenders/swift-libraw.git",
-      branch: "feature/16-bit-rgb-prores"
+      branch: "main"
     ),
   ],
   targets: targets

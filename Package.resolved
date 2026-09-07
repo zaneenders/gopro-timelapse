@@ -1,5 +1,5 @@
 {
-  "originHash" : "bafbaf33b83a8ccf49f19b3d543d551548d1f1ba5f7b7bbd0547050659393ecb",
+  "originHash" : "9ac92510ecca15ec5ec608c164311e9a8675ce915d8dda942075f041f2b7ec52",
   "pins" : [
     {
       "identity" : "chroma",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/zaneenders/swift-libraw.git",
       "state" : {
-        "branch" : "feature/16-bit-rgb-prores",
-        "revision" : "4588991a5ebddbd29326cca5ad77b28f49dcbdea"
+        "branch" : "main",
+        "revision" : "3c526151628a72c0146c87d704e8feeed872b5d2"
       }
     }
   ],
