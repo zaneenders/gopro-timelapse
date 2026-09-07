@@ -60,48 +60,27 @@ enum MovieRenderer {
     }
     let ffmpeg = try ffmpegURL()
     let encoderList = availableEncoders(ffmpeg)
-    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "gopro-timelapse-movie-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: temporary) }
-
-    let master = output.deletingPathExtension().appendingPathExtension("prores.mov")
+    let master = MovieEncodingPlan.masterURL(for: output)
     let first = try develop16(
       source: sources[0], grade: grades[0], width: settings.maximumWidth,
-      denoise: settings.preview ? 0.15 : 0.7, temporary: temporary)
+      denoise: settings.preview ? 0.15 : 0.7)
     let expectedBytes = first.width * first.height * 3 * 2
     guard first.pixels.count == expectedBytes else { throw MovieRenderError.invalidRGBData }
 
     try FileManager.default.createDirectory(
       at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-    let proResEncoder: String
-    let proResDescription: String
-    if encoderList.contains("prores_videotoolbox") {
-      proResEncoder = "prores_videotoolbox"
-      proResDescription = "VideoToolbox ProRes 422 HQ"
-    } else if encoderList.contains("prores_ks") {
-      proResEncoder = "prores_ks"
-      proResDescription = "software ProRes 422 HQ"
-    } else {
+    guard let proResEncoder = MovieEncodingPlan.proResEncoder(available: encoderList) else {
       throw MovieRenderError.missingProResEncoder
     }
-
+    let proResDescription = proResEncoder.description
     let process = Process()
     process.executableURL = ffmpeg
-    let proResPixelFormat =
-      proResEncoder == "prores_videotoolbox" ? "p210le" : "yuv422p10le"
-    var arguments = [
-      "-y", "-v", "error",
-      "-f", "rawvideo", "-pixel_format", "rgb48le",
+    let arguments = [
+      "-y", "-v", "error", "-f", "rawvideo", "-pixel_format", "rgb48le",
       "-video_size", "\(first.width)x\(first.height)",
       "-framerate", String(settings.fps), "-i", "-",
-      "-vf", "format=\(proResPixelFormat)", "-c:v", proResEncoder, "-profile:v", "3",
-    ]
-    if proResEncoder == "prores_videotoolbox" { arguments += ["-allow_sw", "0"] }
-    arguments += [
-      "-pix_fmt", proResPixelFormat, "-colorspace", "bt709", "-color_primaries", "bt709",
-      "-color_trc", "bt709", master.path,
-    ]
+    ] + MovieEncodingPlan.proResArguments(
+      encoder: proResEncoder, output: master, explicitVideoRange: false)
     process.arguments = arguments
     let input = Pipe()
     let outputPipe = Pipe()
@@ -140,7 +119,7 @@ enum MovieRenderer {
             if Task.isCancelled { throw CancellationError() }
             let image = try develop16(
               source: sources[index], grade: grades[index], width: settings.maximumWidth,
-              denoise: settings.preview ? 0.15 : 0.7, temporary: temporary)
+              denoise: settings.preview ? 0.15 : 0.7)
             return (index, image)
           }
         }
@@ -180,41 +159,24 @@ enum MovieRenderer {
         capturedError.text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    let deliveryEncoder: String
-    let deliveryPixelFormat: String
-    var deliveryArguments = ["-y", "-v", "error", "-i", master.path]
+    let deliveryBackend: DeliveryEncoder
     #if os(macOS)
-    if encoderList.contains("hevc_videotoolbox") {
-      deliveryEncoder = "VideoToolbox HEVC Main 10"
-      deliveryPixelFormat = "p010le"
-      deliveryArguments += [
-        "-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-b:v", "30M",
-        "-maxrate", "30M", "-bufsize", "60M", "-allow_sw", "0",
-      ]
-    } else {
-      deliveryEncoder = "libx265 HEVC Main 10"
-      deliveryPixelFormat = "yuv420p10le"
-      deliveryArguments += ["-c:v", "libx265", "-preset", "medium", "-crf", "20"]
-    }
+    deliveryBackend = MovieEncodingPlan.deliveryEncoder(
+      codec: .hevc, available: encoderList, preference: [.videotoolbox])
     #else
-    if encoderList.contains("hevc_nvenc") {
-      deliveryEncoder = "NVENC HEVC Main 10"
-      deliveryPixelFormat = "p010le"
-      deliveryArguments += [
-        "-c:v", "hevc_nvenc", "-profile:v", "main10", "-preset", "p6",
-        "-rc", "vbr", "-cq", "20",
-      ]
-    } else {
-      deliveryEncoder = "libx265 HEVC Main 10"
-      deliveryPixelFormat = "yuv420p10le"
-      deliveryArguments += ["-c:v", "libx265", "-preset", "medium", "-crf", "20"]
-    }
+    deliveryBackend = MovieEncodingPlan.deliveryEncoder(
+      codec: .hevc, available: encoderList, preference: [.nvenc])
     #endif
-    deliveryArguments += [
-      "-pix_fmt", deliveryPixelFormat, "-tag:v", "hvc1", "-colorspace", "bt709",
-      "-color_primaries", "bt709", "-color_trc", "bt709", "-movflags", "+faststart",
-      output.path,
-    ]
+    let deliveryEncoder: String
+    switch deliveryBackend {
+    case .videotoolbox: deliveryEncoder = "VideoToolbox HEVC Main 10"
+    case .nvenc: deliveryEncoder = "NVENC HEVC Main 10"
+    case .software: deliveryEncoder = "libx265 HEVC Main 10"
+    }
+    let deliveryArguments = ["-y", "-v", "error", "-i", master.path]
+      + MovieEncodingPlan.deliveryArguments(
+        codec: .hevc, encoder: deliveryBackend, output: output,
+        softwarePreset: "medium", explicitVideoRange: false, explicitMain10Profile: true)
     let deliveryProcess = Process()
     deliveryProcess.executableURL = ffmpeg
     deliveryProcess.arguments = deliveryArguments
@@ -231,16 +193,11 @@ enum MovieRenderer {
   }
 
   private static func develop16(
-    source: URL, grade: Grade, width: Int, denoise: Double, temporary _: URL
+    source: URL, grade: Grade, width: Int, denoise: Double
   ) throws -> LibrawRGB16Image {
-    let dng = try DNGCache.dng(for: source)
-    let developer = Libraw()
-    try developer.open(dng.path)
-    developer.setGrade(
-      grade.librawGrade)
-    developer.setDenoise(denoise)
-    developer.setMaxWidth(width)
-    return try developer.developRGB16()
+    try RAWDeveloper.developRGB16(
+      source: source, grade: grade,
+      settings: .init(maximumWidth: width, denoise: denoise))
   }
 
   private static func metrics(

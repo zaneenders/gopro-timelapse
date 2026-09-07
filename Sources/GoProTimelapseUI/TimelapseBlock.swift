@@ -524,14 +524,9 @@ public final class TimelapseUIState {
       throw PreviewError.rawOnly
     }
 
-    let dng = try DNGCache.dng(for: source)
-    let developer = Libraw()
-    try developer.open(dng.path)
-    developer.setGrade(
-      grade.librawGrade)
-    developer.setDenoise(0.4)
-    developer.setMaxWidth(1280)
-    let rgb = try developer.developRGB()
+    let rgb = try RAWDeveloper.developRGB(
+      source: source, grade: grade,
+      settings: .init(maximumWidth: 1280, denoise: 0.4))
 
     let pixelCount = rgb.width * rgb.height
     guard rgb.pixels.count == pixelCount * 3 else { throw PreviewError.invalidRGBData }

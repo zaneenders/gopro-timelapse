@@ -226,3 +226,19 @@ inserted. Legacy smoothstep ramps ease each segment independently, so inserting
 an anchor can change that curve; the grading editor must account for this
 rather than promising shape-preserving insertion in Smooth mode. No new editor
 controls or ramp save/load UI are included in this foundation refactor.
+
+### Shared development and encoding
+
+`RAWDeveloper` in Core owns cached GPR → DNG → LibRaw development for CLI
+rendering, UI previews/export, and sequence analysis. `RAWDevelopmentSettings`
+keeps width and denoise explicit; analysis continues to use fixed white balance,
+and preview/export retain their existing quality settings. Chroma image creation
+stays in UI.
+
+`MovieEncodingPlan` builds ProRes and HEVC/H.264 encoding arguments without
+launching FFmpeg. Both frontends share backend selection helpers, master naming,
+pixel formats, and color metadata construction. Existing differences remain
+explicit: CLI uses the `slow` software preset and video-range tagging, while UI
+uses `medium` and its existing profile/range settings. Encoder availability is
+not a hardware usability probe. Process execution, frame scheduling, and progress
+presentation remain in the frontends for a later extraction.

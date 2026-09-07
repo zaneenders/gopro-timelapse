@@ -6,19 +6,9 @@ struct RAWRenderer: Sendable {
   let width: Int
   let denoise: Double
 
-  private func developer(source: URL, grade: Grade, temporaryDirectory _: URL) throws -> Libraw {
-    let dng = try DNGCache.dng(for: source)
-    let dev = Libraw()
-    try dev.open(dng.path)
-    dev.setGrade(grade.librawGrade)
-    dev.setDenoise(denoise)
-    dev.setMaxWidth(width)
-    return dev
-  }
-
-  func render(source: URL, destination: URL, grade: Grade, temporaryDirectory: URL) throws {
+  func render(source: URL, destination: URL, grade: Grade) throws {
     let image = try renderRGB16(
-      source: source, grade: grade, temporaryDirectory: temporaryDirectory)
+      source: source, grade: grade)
     try Self.writePPM16(image, to: destination)
   }
 
@@ -45,8 +35,9 @@ struct RAWRenderer: Sendable {
     try data.write(to: destination, options: .atomic)
   }
 
-  func renderRGB16(source: URL, grade: Grade, temporaryDirectory: URL) throws -> LibrawRGB16Image {
-    let dev = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
-    return try dev.developRGB16()
+  func renderRGB16(source: URL, grade: Grade) throws -> LibrawRGB16Image {
+    try RAWDeveloper.developRGB16(
+      source: source, grade: grade,
+      settings: .init(maximumWidth: width, denoise: denoise))
   }
 }

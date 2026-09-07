@@ -75,15 +75,10 @@ public enum SequenceAnalyzer {
   private static func analyzeGPR(
     source: URL, frame: Int, maximumWidth: Int, denoise: Double, temperature: Double
   ) throws -> LuminanceSample {
-    let dng = try DNGCache.dng(for: source)
-    let developer = Libraw()
-    try developer.open(dng.path)
-    // Lock white balance for the entire sequence. Per-frame camera WB can
-    // otherwise turn chroma changes into apparent luminance flicker.
-    developer.setGrade(LibrawGrade(temperature: temperature))
-    developer.setDenoise(denoise)
-    developer.setMaxWidth(maximumWidth)
-    let image = try developer.developRGB16()
+    // Lock white balance so camera WB changes do not become luminance flicker.
+    let image = try RAWDeveloper.developRGB16(
+      source: source, grade: Grade(temperature: temperature),
+      settings: .init(maximumWidth: maximumWidth, denoise: denoise))
     return luminance(
       width: image.width, height: image.height, rgb48LE: image.pixels, frame: frame)
   }
