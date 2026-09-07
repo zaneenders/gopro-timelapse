@@ -59,7 +59,7 @@ enum MovieRenderer {
       throw MovieRenderError.rawOnly
     }
     let ffmpeg = try ffmpegURL()
-    let encoderList = availableEncoders(ffmpeg)
+    let encoderList = try await ProcessRunner.availableEncoders(executable: ffmpeg)
     let master = MovieEncodingPlan.masterURL(for: output)
     let first = try develop16(
       source: sources[0], grade: grades[0], width: settings.maximumWidth,
@@ -177,15 +177,9 @@ enum MovieRenderer {
       + MovieEncodingPlan.deliveryArguments(
         codec: .hevc, encoder: deliveryBackend, output: output,
         softwarePreset: "medium", explicitVideoRange: false, explicitMain10Profile: true)
-    let deliveryProcess = Process()
-    deliveryProcess.executableURL = ffmpeg
-    deliveryProcess.arguments = deliveryArguments
-    deliveryProcess.standardInput = FileHandle.nullDevice
     outputHandler(.system, commandDescription(executable: ffmpeg, arguments: deliveryArguments))
-    let captured = try runCapturingOutput(deliveryProcess, outputHandler: outputHandler)
-    guard deliveryProcess.terminationStatus == 0 else {
-      throw MovieRenderError.ffmpegFailed(
-        captured.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    _ = try await ProcessRunner.run(executable: ffmpeg, arguments: deliveryArguments) { stream, data in
+      outputHandler(stream == .stdout ? .stdout : .stderr, String(decoding: data, as: UTF8.self))
     }
     return metrics(
       start: start, sources: sources, output: output, settings: settings,
@@ -221,29 +215,6 @@ enum MovieRenderer {
       encoder: encoder,
       source: source,
       maximumWidth: settings.maximumWidth)
-  }
-
-  private static func runCapturingOutput(
-    _ process: Process,
-    outputHandler: @escaping ProcessOutputHandler
-  ) throws -> (stdout: String, stderr: String) {
-    let output = Pipe()
-    let errors = Pipe()
-    process.standardOutput = output
-    process.standardError = errors
-    let capturedOutput = ProcessOutputCapture()
-    let capturedError = ProcessOutputCapture()
-    let readers = DispatchGroup()
-    startReading(
-      output, stream: .stdout, captured: capturedOutput, group: readers,
-      outputHandler: outputHandler)
-    startReading(
-      errors, stream: .stderr, captured: capturedError, group: readers,
-      outputHandler: outputHandler)
-    try process.run()
-    process.waitUntilExit()
-    readers.wait()
-    return (capturedOutput.text, capturedError.text)
   }
 
   private static func wait(for group: DispatchGroup) async {
@@ -285,32 +256,18 @@ enum MovieRenderer {
     return "$ \(command)\n"
   }
 
-  private static func availableEncoders(_ ffmpeg: URL) -> String {
-    let process = Process()
-    process.executableURL = ffmpeg
-    process.arguments = ["-hide_banner", "-encoders"]
-    process.standardInput = FileHandle.nullDevice
-    let output = Pipe()
-    process.standardOutput = output
-    process.standardError = FileHandle.nullDevice
-    do { try process.run() } catch { return "" }
-    let data = output.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    return String(data: data, encoding: .utf8) ?? ""
+  private static func ffmpegURL() throws -> URL {
+    #if os(macOS)
+    let additionalDirectories = ["/opt/homebrew/bin", "/usr/local/bin"]
+    #else
+    let additionalDirectories: [String] = []
+    #endif
+    guard let executable = ProcessRunner.executableURL(
+      "ffmpeg", additionalDirectories: additionalDirectories)
+    else { throw MovieRenderError.ffmpegNotFound }
+    return executable
   }
 
-  private static func ffmpegURL() throws -> URL {
-    var directories = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-      .split(separator: ":").map(String.init)
-    #if os(macOS)
-    directories += ["/opt/homebrew/bin", "/usr/local/bin"]
-    #endif
-    for directory in directories {
-      let candidate = URL(fileURLWithPath: directory).appendingPathComponent("ffmpeg")
-      if FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
-    }
-    throw MovieRenderError.ffmpegNotFound
-  }
 }
 
 enum MovieRenderError: Error, CustomStringConvertible {

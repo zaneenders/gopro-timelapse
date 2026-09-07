@@ -240,5 +240,13 @@ launching FFmpeg. Both frontends share backend selection helpers, master naming,
 pixel formats, and color metadata construction. Existing differences remain
 explicit: CLI uses the `slow` software preset and video-range tagging, while UI
 uses `medium` and its existing profile/range settings. Encoder availability is
-not a hardware usability probe. Process execution, frame scheduling, and progress
-presentation remain in the frontends for a later extraction.
+not a hardware usability probe. `ProcessRunner` now owns non-streaming command execution and encoder discovery:
+stdout/stderr are drained concurrently, captures retain a bounded diagnostic tail,
+and task cancellation terminates the direct child (with SIGKILL escalation after
+500 ms). Output callbacks receive byte chunks and must be thread-safe and
+nonblocking. Commands that spawn descendants retaining the output pipes are not
+supported; launch FFmpeg directly rather than through a shell wrapper.
+
+Raw-frame stdin streaming, frame scheduling, and progress presentation remain in
+the frontends for a later extraction. Existing streaming-process handling is not
+yet covered by the shared runner's cancellation guarantees.

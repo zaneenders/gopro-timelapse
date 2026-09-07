@@ -154,49 +154,13 @@ func parseArguments() throws -> Options? {
   return o
 }
 
-func executableURL(_ name: String) -> URL? {
-  if name.contains("/") {
-    let u = URL(fileURLWithPath: name).standardizedFileURL
-    return FileManager.default.isExecutableFile(atPath: u.path) ? u : nil
-  }
-  for path in (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":") {
-    let u = URL(fileURLWithPath: String(path)).appendingPathComponent(name)
-    if FileManager.default.isExecutableFile(atPath: u.path) { return u }
-  }
-  return nil
-}
-
 func shellQuote(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
-func availableEncoders(ffmpeg: URL) -> String {
-  let process = Process()
-  process.executableURL = ffmpeg
-  process.arguments = ["-hide_banner", "-encoders"]
-  let pipe = Pipe()
-  process.standardInput = FileHandle.nullDevice
-  process.standardOutput = pipe
-  process.standardError = FileHandle.nullDevice
-  do { try process.run() } catch { return "" }
-  process.waitUntilExit()
-  return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-}
-
-func runProcess(_ executable: URL, _ arguments: [String], quiet: Bool = true) throws {
-  let process = Process()
-  process.executableURL = executable
-  process.arguments = arguments
-  process.standardInput = FileHandle.nullDevice
-  if quiet {
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-  } else {
-    process.standardOutput = FileHandle.standardOutput
-    process.standardError = FileHandle.standardError
-  }
-  try process.run()
-  process.waitUntilExit()
-  guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-    throw CLIError.message("\(executable.lastPathComponent) failed (status \(process.terminationStatus))")
+func runProcess(_ executable: URL, _ arguments: [String], quiet: Bool = true) async throws {
+  _ = try await ProcessRunner.run(executable: executable, arguments: arguments) { stream, data in
+    guard !quiet else { return }
+    let handle = stream == .stdout ? FileHandle.standardOutput : FileHandle.standardError
+    try? handle.write(contentsOf: data)
   }
 }
 
@@ -395,7 +359,7 @@ func run() async throws {
   print(String(format: "Video: %.2f seconds at %.3g fps → %@", Double(sources.count) / o.fps, o.fps, output.path))
   if o.dryRun { return }
 
-  guard let ffmpeg = executableURL(o.ffmpeg) else {
+  guard let ffmpeg = ProcessRunner.executableURL(o.ffmpeg) else {
     throw CLIError.message("ffmpeg not found. Install it or pass --ffmpeg /path/to/ffmpeg")
   }
   try fm.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -407,7 +371,7 @@ func run() async throws {
   try fm.createDirectory(at: frames, withIntermediateDirectories: true)
   defer { if !o.keepFrames { try? fm.removeItem(at: temporary) } }
 
-  let encoderList = availableEncoders(ffmpeg: ffmpeg)
+  let encoderList = try await ProcessRunner.availableEncoders(executable: ffmpeg)
   let videoToolboxName = o.codec == "hevc" ? "hevc_videotoolbox" : "h264_videotoolbox"
   let nvencName = o.codec == "hevc" ? "hevc_nvenc" : "h264_nvenc"
   let selectedEncoder: DeliveryEncoder
@@ -502,13 +466,13 @@ func run() async throws {
       args += ["-hide_banner", "-framerate", String(o.fps), "-start_number", "0", "-i", pattern]
       appendProResEncoding(to: &args, output: proResMaster)
       print("Master encoder: \(proResEncoderDescription)")
-      try runProcess(ffmpeg, args, quiet: false)
+      try await runProcess(ffmpeg, args, quiet: false)
 
       var deliveryArgs = o.overwrite ? ["-y"] : ["-n"]
       deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
       appendVideoEncoding(to: &deliveryArgs)
       print("Delivery encoder: \(encoderDescription)")
-      try runProcess(ffmpeg, deliveryArgs, quiet: false)
+      try await runProcess(ffmpeg, deliveryArgs, quiet: false)
     } else {
       // Develop the first frame before launching ffmpeg so rawvideo has
       // exact dimensions. Remaining frames are developed in parallel.
@@ -611,7 +575,7 @@ func run() async throws {
       deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
       appendVideoEncoding(to: &deliveryArgs)
       print("Delivery encoder: \(encoderDescription)")
-      try runProcess(ffmpeg, deliveryArgs, quiet: false)
+      try await runProcess(ffmpeg, deliveryArgs, quiet: false)
     }
   } else {
     for (index, source) in sources.enumerated() {
@@ -625,13 +589,13 @@ func run() async throws {
     let scale = o.width > 0 ? "scale='min(\(o.width),iw)':-2" : "scale=trunc(iw/2)*2:trunc(ih/2)*2"
     appendProResEncoding(to: &args, output: proResMaster, filter: scale)
     print("Master encoder: \(proResEncoderDescription)")
-    try runProcess(ffmpeg, args, quiet: false)
+    try await runProcess(ffmpeg, args, quiet: false)
 
     var deliveryArgs = o.overwrite ? ["-y"] : ["-n"]
     deliveryArgs += ["-hide_banner", "-i", proResMaster.path]
     appendVideoEncoding(to: &deliveryArgs)
     print("Delivery encoder: \(encoderDescription)")
-    try runProcess(ffmpeg, deliveryArgs, quiet: false)
+    try await runProcess(ffmpeg, deliveryArgs, quiet: false)
   }
   print("ProRes master: \(proResMaster.path)")
   print("Done: \(output.path)")
