@@ -147,7 +147,7 @@ and shadows and vibrance conventionally in `-1...1`.
 - `--analyze FILE` — analyze GPR frames in parallel, write correction JSON, and exit
 - `--automatic-correction FILE` — apply a saved dense per-frame correction
 - `--automatic-strength 0...2` — scale the saved correction; default `1`
-- `--keep-frames` — retain developed PNG frames
+- `--keep-frames` — retain lossless 16-bit PPM frames (used to encode the master; existing 8-bit PNGs are not reused)
 - GPR conversions persist under `<source>/.gopro-timelapse/dng`; delete that folder to rebuild the DNG cache
 - Final renders retain a same-basename `.prores.mov` 10-bit ProRes 422 HQ master
 - `--encoder auto|software|videotoolbox|nvenc` — choose the HEVC/H.264 delivery encoder
