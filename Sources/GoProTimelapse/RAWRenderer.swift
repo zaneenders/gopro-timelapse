@@ -40,9 +40,9 @@ struct RAWRenderer: Sendable {
     try dev.developPNG(to: destination.path)
   }
 
-  func renderRGB(source: URL, grade: Grade, temporaryDirectory: URL) throws -> LibrawRGBImage {
+  func renderRGB16(source: URL, grade: Grade, temporaryDirectory: URL) throws -> LibrawRGB16Image {
     let (dev, dng) = try developer(source: source, grade: grade, temporaryDirectory: temporaryDirectory)
     defer { try? FileManager.default.removeItem(at: dng) }
-    return try dev.developRGB()
+    return try dev.developRGB16()
   }
 }

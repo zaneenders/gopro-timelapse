@@ -1,8 +1,9 @@
 # GoPro Timelapse
 
 A Swift CLI that converts GoPro `.GPR` RAW frames, develops them with LibRaw,
-applies an interpolated grading ramp, and encodes an MP4 with ffmpeg. Source
-photos are read-only and are never modified.
+applies an interpolated grading ramp, writes a 10-bit ProRes 422 HQ master, and
+transcodes that master to an MP4 with ffmpeg. Source photos are read-only and
+are never modified.
 
 ## Requirements
 
@@ -141,12 +142,14 @@ and shadows and vibrance conventionally in `-1...1`.
 
 - `--source gpr|jpg|auto` — choose RAW, rendered photos, or automatic selection
 - `--denoise 0...1` — RAW chroma denoising; default `0.7`, `0` disables it
+- `--width N` — maximum render width; default `0` preserves source dimensions
 - `--jobs N` — limit parallel RAW analysis/render workers
 - `--analyze FILE` — analyze GPR frames in parallel, write correction JSON, and exit
 - `--automatic-correction FILE` — apply a saved dense per-frame correction
 - `--automatic-strength 0...2` — scale the saved correction; default `1`
 - `--keep-frames` — retain developed PNG frames
-- `--encoder auto|software|videotoolbox|nvenc` — choose the video encoder
+- Final renders retain a same-basename `.prores.mov` 10-bit ProRes 422 HQ master
+- `--encoder auto|software|videotoolbox|nvenc` — choose the HEVC/H.264 delivery encoder
 - `--bitrate N` — VideoToolbox bitrate in Mbps
 - `--crf N` — software/NVENC quality
 - `--overwrite` — replace existing output (and an `--init-ramp` file)
@@ -182,10 +185,10 @@ reused from an image cache. Analyze measures all frames and writes
 
 ## Current scope
 
-Implemented in the shared Core and CLI: GPR-to-DNG conversion, LibRaw
+Implemented in the shared Core and CLI: GPR-to-DNG conversion, 16-bit LibRaw
 development, exposure and color controls, keyframe interpolation, parallel RAW
-analysis and processing, robust luminance-based correction files, and ffmpeg
-encoding. Implemented in the early UI: source entry, sequence scanning, a frame
+analysis and processing, robust luminance-based correction files, 10-bit ProRes
+master generation, and HEVC/H.264 delivery encoding with ffmpeg. Implemented in the early UI: source entry, sequence scanning, a frame
 list, selection, paired-JPEG proxy previews, rendered-photo previews, RAW
 fallback previews, luminance analysis, correction graphing, and movie export.
 A complete visual ramp editor and metadata-aware camera-step correction are not

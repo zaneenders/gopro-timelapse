@@ -365,7 +365,7 @@ public final class TimelapseUIState {
     let output = sourceDirectory.appendingPathComponent(
       preview ? "timelapse-preview.mp4" : "timelapse-render.mp4")
     let settings = MovieRenderSettings(
-      maximumWidth: preview ? 960 : 3_840,
+      maximumWidth: preview ? 960 : 0,
       fps: 30,
       preview: preview)
     isRendering = true
